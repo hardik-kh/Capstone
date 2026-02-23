@@ -1,0 +1,81 @@
+# -----------------------------
+# OS-SPECIFIC FILES
+# -----------------------------
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# PYTHON CACHE / BUILD FILES
+# -----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.pickle
+*.egg-info/
+*.egg
+*.log
+
+# -----------------------------
+# VIRTUAL ENVIRONMENTS
+# -----------------------------
+venv/
+.env/
+.env.local
+.venv/
+
+# -----------------------------
+# PROJECT DATA FILES
+# -----------------------------
+data/
+data/*
+
+# -----------------------------
+# FASTAPI / UVICORN TEMP FILES
+# -----------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.tmp
+
+# -----------------------------
+# PROJECT-SPECIFIC CACHE DIRS
+# -----------------------------
+src/__pycache__/
+src/core/__pycache__/
+src/agents/__pycache__/
+src/agents/ingestion_agent/__pycache__/
+src/agents/etl_agent/__pycache__/
+src/agents/exploration_agent/__pycache__/
+src/agents/statistics_agent/__pycache__/
+src/agents/prediction_agent/__pycache__/
+src/agents/insight_agent/__pycache__/
+
+# -----------------------------
+# EDITOR / IDE FILES
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# JUPYTER NOTEBOOK CHECKPOINTS
+# -----------------------------
+.ipynb_checkpoints/
+
+# -----------------------------
+# TEMPORARY FILES
+# -----------------------------
+tmp/
+temp/
+*.tmp
+*.bak
+
+# -----------------------------
+# TEST OUTPUT / REPORTS
+# -----------------------------
+coverage/
+htmlcov/
+pytest_cache/
