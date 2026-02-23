@@ -1,8 +1,17 @@
+# Simple logger configuration for the ingestion service
+
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
 
-logger = logging.getLogger("IngestionAgent")
+def get_logger(name: str) -> logging.Logger:
+    """Returns a configured logger instance."""
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    return logger
