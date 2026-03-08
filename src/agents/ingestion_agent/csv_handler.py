@@ -2,7 +2,8 @@
 
 import csv
 import pandas as pd
-
+import os
+from datetime import datetime
 from src.core.config import CSV_DELIMITERS, ENCODING_FALLBACKS
 from src.core.exceptions import FileReadError
 
@@ -41,3 +42,27 @@ def load_csv(file_path: str) -> tuple[pd.DataFrame, dict]:
         raise FileReadError(file_path, str(e))
 
     return df, {"encoding": encoding, "delimiter": delimiter}
+
+#ADDED BY PREKSHA
+
+BRONZE_PATH = "data/bronze"
+
+
+def save_to_bronze(df: pd.DataFrame, original_file: str) -> dict:
+    """Saves raw dataframe to Bronze layer as parquet."""
+    os.makedirs(BRONZE_PATH, exist_ok=True)
+
+    file_name = os.path.basename(original_file).replace(".csv", "")
+    output_path = os.path.join(
+        BRONZE_PATH,
+        f"{file_name}_bronze.parquet"
+    )
+
+    df.to_parquet(output_path, index=False)
+
+    return {
+        "rows": len(df),
+        "columns": len(df.columns),
+        "output_path": output_path,
+        "timestamp": datetime.now()
+    }

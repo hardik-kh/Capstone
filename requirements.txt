@@ -5,8 +5,8 @@ click==8.3.1
 fastapi==0.129.0
 h11==0.16.0
 idna==3.11
-numpy==2.4.2
-pandas==3.0.1
+numpy==1.26.4
+pandas==2.2.2
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-dateutil==2.9.0.post0
@@ -15,3 +15,5 @@ starlette==0.52.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.41.0
+pyarrow==15.0.2
+python-multipart==0.0.9

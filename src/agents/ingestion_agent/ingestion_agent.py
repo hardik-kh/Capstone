@@ -1,6 +1,7 @@
 # Core ingestion orchestration: validation, loading, cleaning, profiling
 
 import os
+import time
 import tempfile
 from typing import Any
 
@@ -9,7 +10,8 @@ from fastapi import UploadFile
 from src.core.exceptions import IngestionError
 from src.core.logger import get_logger
 from src.agents.ingestion_agent.validators import validate_file
-from src.agents.ingestion_agent.csv_handler import load_csv
+from src.agents.ingestion_agent.validators import validate_dataframe_rows
+from src.agents.ingestion_agent.csv_handler import load_csv, save_to_bronze
 from src.agents.ingestion_agent.excel_handler import load_excel
 from src.agents.ingestion_agent.profiler import clean_and_profile
 
@@ -45,23 +47,38 @@ async def ingest_files(files: list[UploadFile]) -> dict:
 
         try:
             ext = validate_file(file)
-
+            start_time = time.time()
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 tmp.write(await file.read())
                 tmp_path = tmp.name
-
+            #MODIFIED BY PREKSHA
             if ext == ".csv":
                 df, meta = load_csv(tmp_path)
+                bronze_info = save_to_bronze(df, file.filename)
+
+                # Row-level validation
+                validation_metrics = validate_dataframe_rows(df)
+
                 df_clean, profiling = clean_and_profile(df)
+
+                # ✅ Measure latency AFTER all processing
+                end_time = time.time()
+                latency_seconds = round(end_time - start_time, 4)
+
                 results.append(
                     _build_table_entry(
                         table_name=file.filename,
                         df_clean=df_clean,
-                        profiling=profiling,
-                        meta=meta,
+                        profiling={
+                            **profiling,
+                            "validation_metrics": validation_metrics,
+                            "latency_seconds": latency_seconds,
+                        },
+                        meta={**meta, "bronze_info": bronze_info},
                         source_type="csv",
                     )
                 )
+            #MODIFICATION ENDED BY PREKSHA
             else:
                 sheets = load_excel(tmp_path)
                 for sheet_name, df in sheets.items():
