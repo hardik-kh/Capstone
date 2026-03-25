@@ -79,3 +79,5 @@ temp/
 coverage/
 htmlcov/
 pytest_cache/
+
+.env

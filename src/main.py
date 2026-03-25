@@ -1,29 +1,21 @@
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-from src.agents.ingestion_agent.router import router as ingestion_router
 
-app = FastAPI(
-    title="Autonomous Analytics",
-    version="0.1.0"
-)
+# upload to bronze layer 
+from agent.data_ingestion.upload_csv import router as csv_router
+from agent.data_ingestion.upload_xlsx import router as xlsx_router
+from agent.data_ingestion.upload_sql import router as sql_router
 
-# -------------------------------
-# Home route
-# -------------------------------
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    return """
-    <html>
-        <head>
-            <title>Autonomous Analytics</title>
-        </head>
-        <body style="font-family: Arial; padding: 40px;">
-            <h1>Autonomous Analytics</h1>
-            <p>Welcome to the Autonomous Analytics API.</p>
-            <p>Visit <a href="/docs">/docs</a> to use the ingestion agent.</p>
-        </body>
-    </html>
-    """
+# generate validation SQL for all tables in bronze layer
+from agent.data_ingestion.generate_validation_sql import router as validation_router
+from agent.data_ingestion.run_validation_sql import router as run_validation_router
 
-# Existing ingestion routes
-app.include_router(ingestion_router, prefix="/ingest", tags=["Data Ingestion"])
+app = FastAPI()
+
+# Register data ingestion routers to bronze layer
+app.include_router(csv_router, prefix="/ingestion", tags=["CSV Ingestion"])
+app.include_router(xlsx_router, prefix="/ingestion", tags=["XLSX Ingestion"])
+app.include_router(sql_router, prefix="/ingestion", tags=["SQL Ingestion"])
+
+# Register validation SQL generation router
+app.include_router(validation_router, prefix="/ingestion", tags=["Validation SQL"])
+app.include_router(run_validation_router, prefix="/ingestion", tags=["Validation SQL"])
