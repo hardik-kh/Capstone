@@ -79,3 +79,11 @@ temp/
 coverage/
 htmlcov/
 pytest_cache/
+
+# ------------------------------
+# EDA OUTPUTS
+# ------------------------------
+eda_outputs/
+__pycache__/
+venv/
+*.pyc
