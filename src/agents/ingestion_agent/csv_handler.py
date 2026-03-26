@@ -1,11 +1,12 @@
 # CSV loading with encoding and delimiter detection
 
 import csv
-import pandas as pd
 import os
 from datetime import datetime
-from src.core.config import CSV_DELIMITERS, ENCODING_FALLBACKS
-from src.core.exceptions import FileReadError
+import pandas as pd
+
+from core.config import BRONZE_OUTPUT_DIR, CSV_DELIMITERS, ENCODING_FALLBACKS
+from core.exceptions import FileReadError
 
 
 def detect_encoding(file_path: str) -> str:
@@ -43,26 +44,35 @@ def load_csv(file_path: str) -> tuple[pd.DataFrame, dict]:
 
     return df, {"encoding": encoding, "delimiter": delimiter}
 
-#ADDED BY PREKSHA
-
-BRONZE_PATH = "data/bronze"
-
-
 def save_to_bronze(df: pd.DataFrame, original_file: str) -> dict:
-    """Saves raw dataframe to Bronze layer as parquet."""
-    os.makedirs(BRONZE_PATH, exist_ok=True)
+    """Saves raw dataframe to Bronze layer, preferring parquet with CSV fallback."""
+    os.makedirs(BRONZE_OUTPUT_DIR, exist_ok=True)
 
     file_name = os.path.basename(original_file).replace(".csv", "")
-    output_path = os.path.join(
-        BRONZE_PATH,
-        f"{file_name}_bronze.parquet"
-    )
+    parquet_path = os.path.join(BRONZE_OUTPUT_DIR, f"{file_name}_bronze.parquet")
+    csv_path = os.path.join(BRONZE_OUTPUT_DIR, f"{file_name}_bronze.csv")
 
-    df.to_parquet(output_path, index=False)
+    storage_format = "parquet"
+    warning = None
+
+    try:
+        df.to_parquet(parquet_path, index=False)
+        output_path = parquet_path
+    except (ImportError, ModuleNotFoundError, ValueError) as exc:
+        # Parquet requires an optional engine such as pyarrow or fastparquet.
+        df.to_csv(csv_path, index=False)
+        output_path = csv_path
+        storage_format = "csv"
+        warning = (
+            "Parquet engine unavailable; saved bronze output as CSV instead. "
+            f"Details: {exc}"
+        )
 
     return {
         "rows": len(df),
         "columns": len(df.columns),
         "output_path": output_path,
-        "timestamp": datetime.now()
+        "storage_format": storage_format,
+        "warning": warning,
+        "timestamp": datetime.now().isoformat(),
     }

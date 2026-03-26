@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from src.core.exceptions import FileReadError
+from core.exceptions import FileReadError
 
 
 def load_excel(file_path: str) -> dict[str, pd.DataFrame]:

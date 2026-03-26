@@ -60,3 +60,14 @@ class ValidationError(IngestionError):
             code="VALIDATION_ERROR",
             hint=hint,
         )
+
+
+class MergeInferenceError(IngestionError):
+    """Raised when the merge-key inference step fails."""
+
+    def __init__(self, message: str, hint: str | None = None):
+        super().__init__(
+            message=message,
+            code="MERGE_INFERENCE_ERROR",
+            hint=hint,
+        )
