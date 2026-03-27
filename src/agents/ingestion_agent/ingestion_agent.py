@@ -9,11 +9,12 @@ from datetime import datetime
 from fastapi import UploadFile
 
 from core.config import UPLOAD_CHUNK_SIZE_BYTES
+from core.config import LARGE_CSV_THRESHOLD_BYTES
 from core.exceptions import IngestionError
 from core.logger import get_logger
 from agents.ingestion_agent.validators import validate_file
 from agents.ingestion_agent.validators import validate_dataframe_rows
-from agents.ingestion_agent.csv_handler import load_csv, save_to_bronze
+from agents.ingestion_agent.csv_handler import load_csv, load_csv_sample, save_to_bronze, copy_csv_to_bronze
 from agents.ingestion_agent.excel_handler import load_excel
 from agents.ingestion_agent.merge_service import merge_csv_files
 from agents.ingestion_agent.profiler import clean_and_profile
@@ -106,20 +107,31 @@ async def ingest_files(files: list[UploadFile]) -> dict:
             logger.info(f"File processing progress for {file.filename}: 20%")
 
             if ext == ".csv":
-                df, meta = load_csv(tmp_path)
+                file_size_bytes = os.path.getsize(tmp_path)
+                is_large_csv = file_size_bytes >= LARGE_CSV_THRESHOLD_BYTES
+                if is_large_csv:
+                    df, meta = load_csv_sample(tmp_path)
+                else:
+                    df, meta = load_csv(tmp_path)
                 file_log["steps"].append(
                     {
-                        "step": "load_csv",
+                        "step": "load_csv_sample" if is_large_csv else "load_csv",
                         "status": "completed",
                         "details": {
                             "rows": int(len(df)),
                             "columns": int(len(df.columns)),
+                            "file_size_bytes": file_size_bytes,
+                            "sample_based": is_large_csv,
                             **meta,
                         },
                     }
                 )
                 logger.info(f"File processing progress for {file.filename}: 40%")
-                bronze_info = save_to_bronze(df, file.filename)
+                bronze_info = (
+                    copy_csv_to_bronze(tmp_path, file.filename)
+                    if is_large_csv
+                    else save_to_bronze(df, file.filename)
+                )
                 file_log["steps"].append(
                     {
                         "step": "save_to_bronze",
@@ -139,7 +151,7 @@ async def ingest_files(files: list[UploadFile]) -> dict:
                 )
                 logger.info(f"File processing progress for {file.filename}: 80%")
 
-                df_clean, profiling = clean_and_profile(df)
+                _, profiling = clean_and_profile(df)
                 file_log["steps"].append(
                     {
                         "step": "clean_and_profile",
@@ -189,7 +201,7 @@ async def ingest_files(files: list[UploadFile]) -> dict:
                 )
                 logger.info(f"File processing progress for {file.filename}: 50%")
                 for sheet_name, df in sheets.items():
-                    df_clean, profiling = clean_and_profile(df)
+                    _, profiling = clean_and_profile(df)
                     file_log["steps"].append(
                         {
                             "step": "clean_and_profile_sheet",
@@ -249,7 +261,7 @@ async def ingest_files(files: list[UploadFile]) -> dict:
         }
         processing_log["events"].append(merge_log_entry)
         try:
-            merged_df, merge_log = merge_csv_files(
+            _, merge_log = merge_csv_files(
                 left_name=csv_artifacts[0]["filename"],
                 left_path=csv_artifacts[0]["tmp_path"],
                 right_name=csv_artifacts[1]["filename"],
@@ -260,6 +272,7 @@ async def ingest_files(files: list[UploadFile]) -> dict:
                 "output_filename": merge_log["output_filename"],
                 "rows": merge_log["merge_summary"]["merged_rows"],
                 "columns": merge_log["merge_summary"]["merged_columns"],
+                "copied_tables": merge_log.get("copied_tables", []),
                 "merge_summary": merge_log["merge_summary"],
             }
             merge_log_entry.update(merge_log)

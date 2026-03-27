@@ -73,6 +73,8 @@ def main() -> None:
         f"{merge_decision.get('merge_columns') or [merge_decision['left_column']]}"
     )
     print(f"Merged file path: {merge_log['output_path']}")
+    if merge_log.get("copied_tables"):
+        print(f"Processed copies: {json.dumps(merge_log['copied_tables'], indent=2, default=str)}")
     if merge_log["merge_summary"]["merged_rows"] == 0:
         print("Warning: merged file has zero rows. The selected merge keys have no overlapping values across the two CSV files.")
     print(json.dumps(merge_log, indent=2, default=str))
