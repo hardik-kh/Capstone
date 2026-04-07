@@ -3,7 +3,7 @@
 
 This repository contains a production‑grade, multi‑agent analytics platform designed to autonomously ingest, clean, analyze, model, and generate insights from real‑world business datasets. The system is built for **resource‑constrained enterprises** that lack dedicated data teams but still need high‑quality analytics.
 
-The platform is modular, scalable, and fully orchestrated using a deterministic workflow engine. It is designed around the **Favorita Grocery Sales dataset**, a complex real‑world forecasting dataset from Ecuador.
+The platform is modular, scalable, and fully orchestrated using a deterministic workflow engine. It is designed around the **Favorita Grocery Sales dataset**, (https://www.kaggle.com/competitions/favorita-grocery-sales-forecasting/data) a complex real‑world forecasting dataset from Ecuador.
 
 ---
 
