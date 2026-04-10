@@ -19,6 +19,7 @@ from agents.ingestion_agent.merge_service import merge_all_csv_files
 from agents.ingestion_agent.profiler import clean_and_profile
 from agents.statistical_agent.statistical_agent import run_statistical_tests
 from agents.eda_agent.eda_agent import run_eda
+from agents.predictive_agent.predictive_agent import run_predictive
 
 logger = get_logger("DataIngestionAgent")
 
@@ -279,11 +280,38 @@ async def ingest_files(files: list) -> dict:
         eda_log_entry["status"] = "failed"
         eda_log_entry["error"] = str(e)
 
+    # ── Predictive Analysis ───────────────────────────────────────────────────
+    predictive_results: list[dict] = []
+    pred_log_entry: dict[str, Any] = {"step": "predictive_analysis", "status": "started"}
+    processing_log["events"].append(pred_log_entry)
+
+    try:
+        # Build a lookup of eda_insights per dataset for the predictive agent
+        eda_insights_lookup: dict[str, dict] = {
+            r["dataset_name"]: r.get("eda_insights", {})
+            for r in eda_results
+        }
+
+        for dataset_name, df_pred in datasets_for_stats:
+            logger.info("Running predictive analysis on: %s", dataset_name)
+            insights = eda_insights_lookup.get(dataset_name, {})
+            pred_result = run_predictive(dataset_name, df_pred, eda_insights=insights)
+            predictive_results.append(pred_result)
+
+        pred_log_entry["status"] = "completed"
+        pred_log_entry["datasets_analyzed"] = [r["dataset_name"] for r in predictive_results]
+
+    except Exception as e:
+        logger.exception("Predictive analysis step failed")
+        pred_log_entry["status"] = "failed"
+        pred_log_entry["error"] = str(e)
+
     return {
-        "tables": results,
-        "errors": errors,
-        "merge_results": merge_results,
+        "tables":              results,
+        "errors":              errors,
+        "merge_results":       merge_results,
         "statistical_results": statistical_results,
-        "eda_results": eda_results,
-        "processing_log": processing_log,
+        "eda_results":         eda_results,
+        "predictive_results":  predictive_results,
+        "processing_log":      processing_log,
     }

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Autonomous Analytics Platform  
 ### Multi‑Agent System for End‑to‑End Data Intelligence
 
@@ -42,3 +43,6 @@ Home page → http://127.0.0.1:8000/
 API docs → http://127.0.0.1:8000/docs
 
 Upload multiple CSV/Excel files via /ingest/.
+=======
+## Multi-Agent Framework for Autonomous Analytics 
+>>>>>>> cfd043097880f098f39b870999b008fa7a7cb101
