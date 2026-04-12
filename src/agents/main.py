@@ -133,11 +133,7 @@ async def ingest_and_report(files: List[UploadFile] = File(...)):
         for dataset_name, df in datasets:
             logger.info("Running reporting agent on: %s", dataset_name)
             insights = eda_insights_lookup.get(dataset_name, {})
-            # Strip file extension so saved paths match what the router reconstructs from the URL
-            clean_name = os.path.splitext(dataset_name)[0]
-            result = run_reporting(clean_name, df, eda_insights=insights)
-            # Preserve original dataset_name in result so frontend can match to other agents
-            result["source_dataset_name"] = dataset_name
+            result = run_reporting(dataset_name, df, eda_insights=insights)
             reporting_results.append(result)
 
     except Exception as e:

@@ -1,0 +1,16 @@
+catboost
+duckdb
+fastapi
+lightgbm
+matplotlib
+numpy
+openai
+pandas
+prophet
+python-dotenv
+scikit_learn
+scipy
+seaborn
+statsforecast
+statsmodels
+xgboost

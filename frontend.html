@@ -1556,6 +1556,10 @@
             <div class="step-status">○</div>
             <span>Predictive Modelling</span>
           </div>
+          <div class="step-item" id="step-reporting">
+            <div class="step-status">○</div>
+            <span>Reporting & Insights</span>
+          </div>
           <div class="step-item" id="step-done">
             <div class="step-status">○</div>
             <span>Complete</span>
@@ -1690,7 +1694,7 @@ async function startIngestion() {
   addActivity('validation', 'Checking file extensions, detecting encoding & delimiters...', 'running');
 
   // Start the API call — stream fake activity while we wait
-  const apiPromise = fetch(`${apiBaseUrl}/ingest/`, { method: 'POST', body: formData })
+  const apiPromise = fetch(`${apiBaseUrl}/ingest-and-report/`, { method: 'POST', body: formData })
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 
   // Scheduled activity messages that fire during the API wait
@@ -1709,6 +1713,10 @@ async function startIngestion() {
     [10800,'predictive', 'AI selecting model (XGBoost / SARIMA / Prophet)...', 'running'],
     [12200,'predictive', 'Training model and generating forecast...', 'running'],
     [13500,'predictive', 'Computing metrics — MAE, RMSE, WAPE score...', 'running'],
+    [14800,'reporting',  'Computing KPIs — sales, orders, growth, top products...', 'running'],
+    [16200,'reporting',  'Generating business charts — trends, regions, categories...', 'running'],
+    [17600,'reporting',  'AI writing executive summary and recommendations...', 'running'],
+    [19000,'reporting',  'Composing 2-page PDF report...', 'running'],
   ];
 
   const timers = activitySchedule.map(([delay, agent, msg, status]) =>
@@ -1736,6 +1744,7 @@ async function startIngestion() {
   const statResults     = data.statistical_results || [];
   const edaResults      = data.eda_results || [];
   const predictResults  = data.predictive_results || [];
+  const reportingResults = data.reporting_results || [];
 
   // Summary banner — appears immediately, replaces activity feed
   appendBlock(`
@@ -1836,6 +1845,15 @@ async function startIngestion() {
     await sleep(120);
   }
 
+  // Reporting — 2-page business report
+  await runStep('step-reporting', 'Running reporting & insights...', 300);
+  if (reportingResults.length > 0) {
+    const passedRep = reportingResults.filter(r => r.status === 'completed').length;
+    addLog('success', `${passedRep} business report(s) generated`);
+    appendBlock(renderReportingSection(reportingResults));
+    await sleep(120);
+  }
+
   await runStep('step-done', 'Done!', 100);
   addLog('success', 'Analysis complete ✓');
   markDone();
@@ -1902,6 +1920,7 @@ const AGENT_META = {
   stats:       { label: 'Statistical Agent',  icon: '📐' },
   eda:         { label: 'EDA Agent',          icon: '📊' },
   predictive:  { label: 'Predictive Agent',   icon: '🔮' },
+  reporting:   { label: 'Reporting Agent',    icon: '📋' },
 };
 
 function addActivity(agentKey, msg, status = 'running') {
@@ -2422,6 +2441,178 @@ function renderEdaDataset(eda) {
   return html;
 }
 
+// ── Reporting section ─────────────────────────────────────────────────────────
+function renderReportingSection(reportingResults) {
+  const completed = reportingResults.filter(r => r.status === 'completed');
+  const total = reportingResults.length;
+
+  let html = `<div class="result-section">
+    <div class="result-section-header" onclick="toggleSection(this)">
+      <div class="result-section-title">📋 Business Reports <span class="section-badge badge-blue">${completed.length}/${total} reports</span></div>
+      <span class="chevron open">▼</span>
+    </div>
+    <div class="result-section-body open">`;
+
+  completed.forEach((rr, idx) => {
+    const kpis    = rr.kpis || {};
+    const charts  = rr.charts || [];
+    const findings = rr.findings || {};
+    const top5p   = findings.top_5_products || [];
+    const top5r   = findings.top_5_regions  || [];
+    const anomalies = findings.anomalies || [];
+    const bw      = findings.best_worst_period || {};
+    const pareto  = findings.pareto || {};
+
+    const fmtSales = v => {
+      if (v == null) return '—';
+      if (Math.abs(v) >= 1e6) return '$' + (v/1e6).toFixed(2) + 'M';
+      if (Math.abs(v) >= 1e3) return '$' + (v/1e3).toFixed(1) + 'K';
+      return '$' + v.toLocaleString(undefined, {maximumFractionDigits:2});
+    };
+    const fmtNum = v => v == null ? '—' : Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, {maximumFractionDigits:2});
+
+    const growth = kpis.growth_over_previous_period;
+    const growthHtml = growth == null ? '—'
+      : `<span style="color:${growth >= 0 ? 'var(--green-500)' : 'var(--red-500)'};">${growth >= 0 ? '▲' : '▼'} ${Math.abs(growth).toFixed(1)}%</span>`;
+
+    html += `
+    <div style="margin-bottom:${idx < completed.length-1 ? '36px' : '0'};">
+
+      <!-- Dataset header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+        <div>
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:4px;">Report</div>
+          <div style="font-size:16px;font-weight:700;color:var(--gray-900);">${rr.dataset_name}</div>
+          <div style="font-size:12px;color:var(--gray-400);margin-top:2px;">Period: ${findings.reporting_period || 'All available data'} · ${rr.row_count?.toLocaleString() || '?'} rows analysed</div>
+        </div>
+        <div style="display:flex;gap:10px;">
+          ${rr.report_html_path ? `<a href="${apiBaseUrl}/reporting/${encodeURIComponent(rr.dataset_name)}/html" target="_blank"
+              style="padding:8px 16px;background:var(--gray-100);color:var(--gray-700);border-radius:var(--radius-sm);font-size:13px;font-weight:600;text-decoration:none;border:1px solid var(--gray-200);">
+              🌐 View HTML
+            </a>` : ''}
+          <a href="${apiBaseUrl}/reporting/${encodeURIComponent(rr.dataset_name)}/pdf" target="_blank"
+              style="padding:8px 16px;background:var(--blue-600);color:white;border-radius:var(--radius-sm);font-size:13px;font-weight:600;text-decoration:none;"
+              title="${rr.report_pdf_path ? 'Download PDF' : 'Open print dialog to save as PDF'}">
+              ${rr.report_pdf_path ? '⬇ Download PDF' : '🖨 Save as PDF'}
+            </a>
+        </div>
+      </div>
+
+      <!-- KPI cards -->
+      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px;">
+        ${[
+          ['Total Sales',    fmtSales(kpis.total_sales),          'reporting period'],
+          ['Total Orders',   fmtNum(kpis.total_orders),           'unique transactions'],
+          ['Units Sold',     fmtNum(kpis.units_sold),             'total quantity'],
+          ['Avg Order Value',fmtSales(kpis.average_order_value),  'per transaction'],
+          ['Period Growth',  growthHtml,                          'vs prior period'],
+        ].map(([label, value, sub]) => `
+          <div style="flex:1 1 140px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);padding:12px 16px;">
+            <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:4px;">${label}</div>
+            <div style="font-size:18px;font-weight:700;color:var(--gray-900);">${value}</div>
+            <div style="font-size:10px;color:var(--gray-400);margin-top:3px;">${sub}</div>
+          </div>`).join('')}
+      </div>
+
+      <!-- Trend summary -->
+      ${kpis.trend_summary ? `
+      <div style="background:linear-gradient(135deg,var(--blue-50),white);border:1px solid var(--blue-100);border-left:4px solid var(--blue-600);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:20px;display:flex;gap:10px;align-items:flex-start;">
+        <span style="font-size:18px;flex-shrink:0;">📈</span>
+        <div>
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--blue-600);margin-bottom:4px;">Trend Summary</div>
+          <div style="font-size:13px;color:var(--gray-800);line-height:1.6;">${kpis.trend_summary}</div>
+        </div>
+      </div>` : ''}
+
+      <!-- Rankings: top products + regions -->
+      ${(top5p.length > 0 || top5r.length > 0) ? `
+      <div style="display:flex;gap:16px;margin-bottom:20px;">
+        ${top5p.length > 0 ? `
+        <div style="flex:1;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:10px;">Top 5 Products</div>
+          <table class="data-table">
+            <thead><tr><th>#</th><th>Product</th><th>Sales</th><th>Share</th></tr></thead>
+            <tbody>${top5p.map((p,i) => `<tr><td>${i+1}</td><td>${p.name}</td><td>${fmtSales(p.sales)}</td><td>${p.share_pct?.toFixed(1)}%</td></tr>`).join('')}</tbody>
+          </table>
+        </div>` : ''}
+        ${top5r.length > 0 ? `
+        <div style="flex:1;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:10px;">Top 5 Regions</div>
+          <table class="data-table">
+            <thead><tr><th>#</th><th>Region</th><th>Sales</th><th>Share</th></tr></thead>
+            <tbody>${top5r.map((r,i) => `<tr><td>${i+1}</td><td>${r.name}</td><td>${fmtSales(r.sales)}</td><td>${r.share_pct?.toFixed(1)}%</td></tr>`).join('')}</tbody>
+          </table>
+        </div>` : ''}
+      </div>` : ''}
+
+      <!-- Charts inline -->
+      ${charts.length > 0 ? `
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:12px;">Report Charts</div>
+      <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:20px;">
+        ${charts.map(c => `
+          <div style="flex:1 1 300px;min-width:260px;">
+            <img src="data:image/png;base64,${c.base64 || ''}" alt="${c.type}"
+              style="width:100%;border-radius:var(--radius);border:1px solid var(--gray-200);cursor:pointer;"
+              onclick="openLightbox(this.src)" loading="lazy"
+              onerror="this.style.display='none'">
+            <div style="font-size:11px;color:var(--gray-400);margin-top:6px;font-style:italic;text-align:center;">${c.caption || ''}</div>
+          </div>`).join('')}
+      </div>` : ''}
+
+      <!-- Pareto + best/worst -->
+      <div style="display:flex;gap:14px;margin-bottom:20px;flex-wrap:wrap;">
+        ${pareto.top_20pct_sales_share != null ? `
+        <div style="flex:1;min-width:180px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);padding:14px 16px;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:6px;">Pareto (80/20)</div>
+          <div style="font-size:22px;font-weight:700;color:var(--gray-900);">${pareto.top_20pct_sales_share?.toFixed(1)}%</div>
+          <div style="font-size:11px;color:var(--gray-500);margin-top:2px;">of sales from top 20% of ${pareto.total_products?.toLocaleString()} products</div>
+        </div>` : ''}
+        ${bw.best_period ? `
+        <div style="flex:1;min-width:180px;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:var(--radius);padding:14px 16px;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#15803D;margin-bottom:6px;">Best Period</div>
+          <div style="font-size:18px;font-weight:700;color:#14532D;">${bw.best_period.period}</div>
+          <div style="font-size:11px;color:#166534;margin-top:2px;">${fmtSales(bw.best_period.sales)}</div>
+        </div>` : ''}
+        ${bw.worst_period ? `
+        <div style="flex:1;min-width:180px;background:#FFF7ED;border:1px solid #FED7AA;border-radius:var(--radius);padding:14px 16px;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#C2410C;margin-bottom:6px;">Worst Period</div>
+          <div style="font-size:18px;font-weight:700;color:#7C2D12;">${bw.worst_period.period}</div>
+          <div style="font-size:11px;color:#9A3412;margin-top:2px;">${fmtSales(bw.worst_period.sales)}</div>
+        </div>` : ''}
+      </div>
+
+      <!-- Anomalies -->
+      ${anomalies.length > 0 ? `
+      <div style="background:var(--amber-100);border:1px solid #fde68a;border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px;">
+        <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#92400e;margin-bottom:8px;">⚠️ ${anomalies.length} Anomalous Period(s) Detected</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          ${anomalies.map(a => `
+            <span style="padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;
+              background:${a.type==='high'?'#fef3c7':'#fee2e2'};
+              color:${a.type==='high'?'#92400e':'#991b1b'};">
+              ${a.type === 'high' ? '▲ HIGH' : '▼ LOW'}: ${a.period} (${fmtSales(a.sales)})
+            </span>`).join('')}
+        </div>
+      </div>` : ''}
+
+      <!-- Duration -->
+      <div style="font-size:11px;color:var(--gray-400);text-align:right;">
+        ⏱ Generated in ${rr.duration_seconds?.toFixed(2)}s
+      </div>
+    </div>`;
+  });
+
+  // Failed ones
+  reportingResults.filter(r => r.status !== 'completed').forEach(rr => {
+    html += `<div style="padding:14px 16px;background:var(--red-100);border-radius:var(--radius-sm);margin-bottom:12px;font-size:13px;color:var(--red-500);">
+      ❌ <strong>${rr.dataset_name}</strong>: ${rr.error || 'Report generation failed'}
+    </div>`;
+  });
+
+  html += `</div></div>`;
+  return html;
+}
+
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 function openLightbox(src) {
   document.getElementById('lightboxImg').src = src;
@@ -2605,9 +2796,8 @@ function getDemoData() {
         duration_seconds: 18.4,
         status: "completed",
         _chartData: (function() {
-          // Generate realistic-looking time series with seasonality
           const n = 60;
-          const splitIdx = 48; // 80% train
+          const splitIdx = 48;
           const labels = Array.from({length: n}, (_, i) => {
             const d = new Date(2017, 0, 1);
             d.setDate(d.getDate() + i * 6);
@@ -2626,6 +2816,67 @@ function getDemoData() {
           });
           return { labels, actual, predicted, splitIdx };
         })()
+      }
+    ],
+    reporting_results: [
+      {
+        dataset_name: "holidays_events__transactions__merged.csv",
+        status: "completed",
+        row_count: 13911,
+        report_html_path: "data/reporting/report.html",
+        report_pdf_path: "data/reporting/report.pdf",
+        duration_seconds: 7.83,
+        kpis: {
+          total_sales: 4827341.50,
+          total_orders: 13911,
+          units_sold: 13911,
+          average_order_value: 347.02,
+          growth_over_previous_period: 12.4,
+          trend_summary: "Sales trend is upward. Revenue grew 12.4% versus the prior period. 2 unusually high period(s) detected (2016-12, 2017-03)."
+        },
+        charts: [],
+        findings: {
+          reporting_period: "Jan 01, 2013 – Aug 15, 2017",
+          top_5_products: [
+            { name: "GROCERY I",       sales: 924187.20, share_pct: 19.1 },
+            { name: "BEVERAGES",       sales: 681234.80, share_pct: 14.1 },
+            { name: "PRODUCE",         sales: 534891.60, share_pct: 11.1 },
+            { name: "CLEANING",        sales: 412673.40, share_pct:  8.5 },
+            { name: "DAIRY",           sales: 339847.00, share_pct:  7.0 },
+          ],
+          top_5_regions: [
+            { name: "Quito",     sales: 1932936.60, share_pct: 40.0 },
+            { name: "Guayaquil", sales: 1206835.38, share_pct: 25.0 },
+            { name: "Cuenca",    sales:  579280.98, share_pct: 12.0 },
+            { name: "Ambato",    sales:  386187.32, share_pct:  8.0 },
+            { name: "Manta",     sales:  289640.49, share_pct:  6.0 },
+          ],
+          category_contribution: [
+            { name: "GROCERY I",  share_pct: 19.1 },
+            { name: "BEVERAGES",  share_pct: 14.1 },
+            { name: "PRODUCE",    share_pct: 11.1 },
+            { name: "CLEANING",   share_pct:  8.5 },
+            { name: "DAIRY",      share_pct:  7.0 },
+            { name: "BREAD/BAKERY", share_pct: 6.3 },
+            { name: "MEATS",      share_pct:  5.8 },
+            { name: "Other",      share_pct: 28.1 },
+          ],
+          best_worst_period: {
+            best_period:  { period: "2016-12", sales: 198432.80 },
+            worst_period: { period: "2013-01", sales:  34218.60 },
+          },
+          pareto: {
+            top_20pct_products_count: 7,
+            top_20pct_sales_share: 78.4,
+            total_products: 33,
+          },
+          anomalies: [
+            { period: "2016-12", sales: 198432.80, type: "high" },
+            { period: "2017-03", sales: 187654.20, type: "high" },
+            { period: "2013-02", sales:  31890.10, type: "low"  },
+          ],
+          seasonality_hint: "Possible seasonality detected — peak month is typically December.",
+        }
       }
     ]
   };
