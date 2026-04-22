@@ -1479,6 +1479,29 @@
       <div class="file-list" id="fileList"></div>
 
       <div class="upload-submit-area" id="submitArea" style="display:none;">
+        <div style="margin-bottom:14px;">
+          <label style="display:block;font-size:12px;font-weight:600;color:var(--gray-600);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">
+            📅 Reporting Window
+          </label>
+          <select id="reportingMonths" style="
+            width:100%;padding:10px 14px;
+            border:1px solid var(--gray-200);border-radius:var(--radius-sm);
+            font-size:14px;font-family:'DM Sans',sans-serif;
+            color:var(--gray-800);background:white;cursor:pointer;
+            appearance:none;background-image:url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%228%22 viewBox=%220 0 12 8%22><path d=%22M1 1l5 5 5-5%22 stroke=%22%2364748b%22 stroke-width=%221.5%22 fill=%22none%22/></svg>');
+            background-repeat:no-repeat;background-position:right 12px center;
+          ">
+            <option value="6">Last 6 months</option>
+            <option value="12" selected>Last 12 months</option>
+            <option value="24">Last 24 months</option>
+            <option value="36">Last 36 months</option>
+            <option value="48">Last 48 months</option>
+            <option value="60">Last 60 months</option>
+          </select>
+          <div style="font-size:11px;color:var(--gray-400);margin-top:5px;">
+            Analysis will be scoped to the most recent N months of your data.
+          </div>
+        </div>
         <button class="btn btn-primary btn-lg" onclick="startIngestion()" style="width:100%; justify-content:center;">
           🚀 Analyze Files
         </button>
@@ -1685,9 +1708,11 @@ async function startIngestion() {
 
   const formData = new FormData();
   selectedFiles.forEach(f => formData.append('files', f));
+  const reportingMonths = parseInt(document.getElementById('reportingMonths')?.value || '12');
+  formData.append('reporting_months', reportingMonths);
 
   await runStep('step-upload', 'Uploading files...', 400);
-  addLog('info', `Sending ${selectedFiles.length} file(s) to Analytiq...`);
+  addLog('info', `Sending ${selectedFiles.length} file(s) to Analytiq — window: last ${reportingMonths} months...`);
   addActivity('ingestion', `Received ${selectedFiles.length} file(s): ${selectedFiles.map(f=>f.name).join(', ')}`, 'running');
 
   await runStep('step-validate', 'Validating files...', 200);
@@ -2462,6 +2487,8 @@ function renderReportingSection(reportingResults) {
     const anomalies = findings.anomalies || [];
     const bw      = findings.best_worst_period || {};
     const pareto  = findings.pareto || {};
+    const warnings = findings.guardrail_warnings || [];
+    const repWindow = findings.reporting_window || {};
 
     const fmtSales = v => {
       if (v == null) return '—';
@@ -2483,7 +2510,11 @@ function renderReportingSection(reportingResults) {
         <div>
           <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:4px;">Report</div>
           <div style="font-size:16px;font-weight:700;color:var(--gray-900);">${rr.dataset_name}</div>
-          <div style="font-size:12px;color:var(--gray-400);margin-top:2px;">Period: ${findings.reporting_period || 'All available data'} · ${rr.row_count?.toLocaleString() || '?'} rows analysed</div>
+          <div style="font-size:12px;color:var(--gray-400);margin-top:2px;">
+            Period: ${findings.reporting_period || 'All available data'} · ${rr.row_count?.toLocaleString() || '?'} rows analysed
+            ${repWindow.requested_months ? `<span style="margin-left:8px;padding:2px 8px;background:var(--blue-100);color:var(--blue-700);border-radius:999px;font-size:10px;font-weight:600;">Last ${repWindow.requested_months}m window</span>` : ''}
+            ${repWindow.rows_before_filter && repWindow.rows_after_filter && repWindow.rows_before_filter !== repWindow.rows_after_filter ? `<span style="margin-left:4px;padding:2px 8px;background:var(--amber-100);color:#92400e;border-radius:999px;font-size:10px;font-weight:600;">${repWindow.rows_before_filter.toLocaleString()} → ${repWindow.rows_after_filter.toLocaleString()} rows after filter</span>` : ''}
+          </div>
         </div>
         <div style="display:flex;gap:10px;">
           ${rr.report_html_path ? `<a href="${apiBaseUrl}/reporting/${encodeURIComponent(rr.dataset_name)}/html" target="_blank"
@@ -2513,6 +2544,24 @@ function renderReportingSection(reportingResults) {
             <div style="font-size:10px;color:var(--gray-400);margin-top:3px;">${sub}</div>
           </div>`).join('')}
       </div>
+
+      <!-- Guardrail warnings -->
+      ${warnings.length > 0 ? `
+      <div style="margin-bottom:20px;">
+        ${warnings.map(w => {
+          const msg = typeof w === 'string' ? w : (w.message || String(w));
+          return `
+        <div style="display:flex;gap:10px;align-items:flex-start;
+          padding:10px 14px;margin-bottom:8px;border-radius:var(--radius-sm);
+          background:var(--amber-100);border-left:3px solid var(--amber-500);">
+          <span style="flex-shrink:0;font-size:15px;">⚠️</span>
+          <div>
+            <div style="font-size:10px;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Data Notice</div>
+            <div style="font-size:13px;color:var(--gray-800);">${msg}</div>
+          </div>
+        </div>`;
+        }).join('')}
+      </div>` : ''}
 
       <!-- Trend summary -->
       ${kpis.trend_summary ? `
@@ -2876,6 +2925,19 @@ function getDemoData() {
             { period: "2013-02", sales:  31890.10, type: "low"  },
           ],
           seasonality_hint: "Possible seasonality detected — peak month is typically December.",
+          guardrail_warnings: [
+            "Units sold is estimated from row count — no quantity column detected.",
+            "Trend direction is based on 12 months of data. Results may improve with a full year of history."
+          ],
+          reporting_window: {
+            requested_months: 12,
+            cutoff_date: "Aug 15, 2016",
+            actual_from: "Aug 16, 2016",
+            actual_to: "Aug 15, 2017",
+            rows_before_filter: 13911,
+            rows_after_filter: 3287,
+            data_total_months: 55,
+          },
         }
       }
     ]

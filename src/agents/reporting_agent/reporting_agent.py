@@ -26,7 +26,8 @@ REPORTING_OUTPUT_DIR = str(DATA_DIR / "reporting")
 def run_reporting(
     dataset_name: str,
     df: pd.DataFrame,
-    eda_insights: Optional[dict] = None,  # accepted for API consistency, reserved for future use
+    eda_insights: Optional[dict] = None,
+    reporting_months: int = 12,
 ) -> dict[str, Any]:
     """
     Main entry point for the Reporting / Insights Agent.
@@ -56,7 +57,7 @@ def run_reporting(
 
     try:
         # ── Step 1: Analytics engine ──────────────────────────────────────────
-        findings = run_analytics(dataset_name, df)
+        findings = run_analytics(dataset_name, df, reporting_months=reporting_months)
         logger.info("Analytics engine complete for %s", dataset_name)
 
         # ── Step 2: Chart generation ──────────────────────────────────────────

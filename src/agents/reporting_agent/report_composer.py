@@ -30,6 +30,25 @@ def _img_to_b64(path: str) -> str:
 
 # ── KPI card helpers ──────────────────────────────────────────────────────────
 
+def _guardrail_warnings_html(warnings: list[str]) -> str:
+    if not warnings:
+        return ""
+    items = "".join(
+        f'<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;">'
+        f'<span style="flex-shrink:0;color:#D97706;">⚠</span>'
+        f'<span>{w}</span></div>'
+        for w in warnings
+    )
+    return (
+        f'<div style="background:#FFFBEB;border:1px solid #FDE68A;border-left:4px solid #D97706;'
+        f'border-radius:0 4px 4px 0;padding:12px 16px;margin:12px 0 16px 0;'
+        f'font-size:10pt;color:#92400E;line-height:1.6;">'
+        f'<div style="font-size:8pt;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:1px;margin-bottom:8px;">Data Quality &amp; Guardrail Notices</div>'
+        f'{items}</div>'
+    )
+
+
 def _fmt_val(val: Any) -> str:
     if val is None:
         return "N/A"
@@ -275,6 +294,8 @@ _HTML_TEMPLATE = """\
     <div class="sub">Reporting Period: {reporting_period} &nbsp;|&nbsp; Generated: {generated_at}</div>
   </div>
 
+  {guardrail_warnings_html}
+
   <div class="section-label">Executive Summary</div>
   <div class="exec-summary">{executive_summary}</div>
 
@@ -311,7 +332,7 @@ _HTML_TEMPLATE = """\
 
   <div class="footer">
     <span>Autonomous Analytics — Reporting Agent</span>
-    <span>Page 1 of 2</span>
+    <span>Page 1 of {total_pages}</span>
   </div>
 </div>
 
@@ -325,7 +346,7 @@ _HTML_TEMPLATE = """\
       <div class="p2-title">Detailed Analysis — {dataset_name}</div>
       <div class="p2-sub">{reporting_period}</div>
     </div>
-    <div class="p2-sub">Page 2 of 2</div>
+    <div class="p2-sub">Page 2 of {total_pages}</div>
   </div>
 
   <div class="section-label">Key Findings</div>
@@ -346,7 +367,7 @@ _HTML_TEMPLATE = """\
 
   <div class="footer">
     <span>Autonomous Analytics — Reporting Agent</span>
-    <span>Page 2 of 2</span>
+    <span>Page 2 of {total_pages}</span>
   </div>
 </div>
 
@@ -484,12 +505,17 @@ def compose_report(
     main_chart = next((c for c in charts if c["type"] == "sales_trend"), None)
     main_chart_html = _chart_html(main_chart) if main_chart else ""
 
+    # Count pages dynamically from the template so "X of Y" is always correct
+    total_pages = _HTML_TEMPLATE.count('<div class="page">')
+
     html = _HTML_TEMPLATE.format(
+        total_pages         = total_pages,
         report_title        = f"Sales Performance Report — {findings.get('dataset_name', '')}",
         dataset_name        = findings.get("dataset_name", ""),
         reporting_period    = findings.get("reporting_period", "All available data"),
         generated_at        = datetime.now().strftime("%B %d, %Y %H:%M"),
         executive_summary   = sections.get("executive_summary", ""),
+        guardrail_warnings_html = _guardrail_warnings_html(findings.get("guardrail_warnings", [])),
         kpi_total_sales     = _fmt_val(kpis.get("total_sales")),
         kpi_total_orders    = _fmt_val(kpis.get("total_orders")),
         kpi_units_sold      = _fmt_val(kpis.get("units_sold")),

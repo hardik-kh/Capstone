@@ -307,9 +307,161 @@ def _trend_summary(kpis: dict, trends: dict, anomalies: list) -> str:
     return " ".join(parts)
 
 
+# ── Time-period guardrail ─────────────────────────────────────────────────────
+
+MAX_MONTHS = 60
+MIN_MONTHS = 6
+
+
+def _apply_time_window(
+    df: pd.DataFrame,
+    date_col: str,
+    reporting_months: int,
+) -> tuple[pd.DataFrame, dict[str, Any], list[str]]:
+    """
+    Filters df to the most recent `reporting_months` of data.
+    Returns (filtered_df, reporting_window dict, guardrail_warnings list).
+    """
+    warnings_out: list[str] = []
+
+    # Hard cap
+    if reporting_months > MAX_MONTHS:
+        warnings_out.append(
+            f"Requested window of {reporting_months} months exceeds the maximum of "
+            f"{MAX_MONTHS} months. Analysis capped at {MAX_MONTHS} months."
+        )
+        reporting_months = MAX_MONTHS
+
+    tmp = df.copy()
+    tmp["_date"] = pd.to_datetime(tmp[date_col], errors="coerce")
+    tmp = tmp.dropna(subset=["_date"])
+
+    rows_before = len(tmp)
+    data_min    = tmp["_date"].min()
+    data_max    = tmp["_date"].max()
+    data_months = (data_max.year - data_min.year) * 12 + (data_max.month - data_min.month)
+
+    # Lower bound check
+    if data_months < MIN_MONTHS:
+        warnings_out.append(
+            f"Dataset only contains ~{data_months} month(s) of data "
+            f"({data_min.strftime('%b %Y')} – {data_max.strftime('%b %Y')}). "
+            f"At least {MIN_MONTHS} months is recommended for reliable trend analysis."
+        )
+
+    # Trend reliability warning scaled to window
+    if reporting_months < 6:
+        warnings_out.append(
+            f"Trend direction may be unreliable — requested window is only "
+            f"{reporting_months} months. At least 6 months is recommended."
+        )
+    elif reporting_months < 12:
+        warnings_out.append(
+            f"Trend direction is based on {reporting_months} months of data. "
+            f"Results may improve with a full 12 months of history."
+        )
+
+    # Filter to window
+    cutoff = data_max - pd.DateOffset(months=reporting_months)
+    filtered = tmp[tmp["_date"] > cutoff].drop(columns=["_date"])
+    rows_after = len(filtered)
+
+    logger.info(
+        "Time window filter: %d months, cutoff=%s, rows %d → %d",
+        reporting_months, cutoff.strftime("%Y-%m-%d"), rows_before, rows_after,
+    )
+
+    if rows_after == 0:
+        warnings_out.append(
+            f"No data found within the last {reporting_months} months "
+            f"(cutoff: {cutoff.strftime('%b %d, %Y')}). Full dataset used instead."
+        )
+        filtered = df  # fall back to full dataset
+
+    window = {
+        "requested_months": reporting_months,
+        "cutoff_date":      cutoff.strftime("%b %d, %Y"),
+        "actual_from":      filtered.pipe(
+            lambda d: pd.to_datetime(d[date_col], errors="coerce").min()
+        ).strftime("%b %d, %Y") if rows_after > 0 else data_min.strftime("%b %d, %Y"),
+        "actual_to":        data_max.strftime("%b %d, %Y"),
+        "rows_before_filter": rows_before,
+        "rows_after_filter":  rows_after if rows_after > 0 else rows_before,
+        "data_total_months":  data_months,
+    }
+
+    return filtered, window, warnings_out
+
+
+# ── Confidence / uncertainty guardrails ───────────────────────────────────────
+
+def _confidence_guardrails(
+    df: pd.DataFrame,
+    cols: dict,
+    kpis: dict,
+    top5_regions: list[dict],
+) -> list[str]:
+    """
+    Checks for weak or incomplete inputs and returns plain-English warning strings.
+    """
+    warnings_out: list[str] = []
+    sales_col = cols.get("sales_col")
+
+    # No sales column
+    if not sales_col:
+        warnings_out.append(
+            "Total sales could not be calculated — no revenue or sales column detected."
+        )
+
+    # No date column
+    if not cols.get("date_col"):
+        warnings_out.append(
+            "Time trends and period-over-period growth could not be calculated "
+            "— no date column detected."
+        )
+
+    # Growth unavailable
+    if cols.get("date_col") and kpis.get("growth_over_previous_period") is None:
+        warnings_out.append(
+            "Period-over-period growth could not be calculated "
+            "— insufficient date range in the selected window."
+        )
+
+    # High null rate on sales column
+    if sales_col and sales_col in df.columns:
+        null_pct = df[sales_col].isna().mean() * 100
+        if null_pct > 20:
+            warnings_out.append(
+                f"{null_pct:.1f}% of sales values are null — "
+                f"totals may be understated."
+            )
+
+    # Units sold estimated from row count (no qty col)
+    if not cols.get("qty_col"):
+        warnings_out.append(
+            "Units sold is estimated from row count — no quantity column detected."
+        )
+
+    # Regional totals reconciliation
+    if top5_regions and sales_col:
+        total_sales = kpis.get("total_sales") or 0
+        region_sum  = sum(r["sales"] for r in top5_regions)
+        if total_sales > 0 and region_sum > total_sales * 1.05:
+            warnings_out.append(
+                f"Regional totals ({region_sum:,.2f}) do not reconcile with overall "
+                f"revenue ({total_sales:,.2f}) — possible overlap or misdetected grouping column."
+            )
+
+    return warnings_out
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_analytics(dataset_name: str, df: pd.DataFrame) -> dict[str, Any]:
+def run_analytics(
+    dataset_name: str,
+    df: pd.DataFrame,
+    reporting_months: int = 12,
+) -> dict[str, Any]:
     """
     Runs the full rules-based analytics pipeline on a single DataFrame.
 
@@ -318,32 +470,64 @@ def run_analytics(dataset_name: str, df: pd.DataFrame) -> dict[str, Any]:
     """
     logger.info("Analytics engine starting: %s (%d rows, %d cols)", dataset_name, len(df), len(df.columns))
 
-    cols    = _detect_columns(df)
-    kpis    = _compute_kpis(df, cols)
-    trends  = _time_trends(df, cols)
+    guardrail_warnings: list[str] = []
+    reporting_window:   dict      = {}
+
+    cols = _detect_columns(df)
+
+    # ── Time-period guardrail ─────────────────────────────────────────────────
+    if cols["date_col"]:
+        df, reporting_window, time_warnings = _apply_time_window(
+            df, cols["date_col"], reporting_months
+        )
+        guardrail_warnings.extend(time_warnings)
+        cols = _detect_columns(df)
+    else:
+        guardrail_warnings.append(
+            "Time-period filter could not be applied — no date column detected. "
+            "Analysis covers the full dataset."
+        )
+
+    # ── Core analytics ────────────────────────────────────────────────────────
+    kpis      = _compute_kpis(df, cols)
+    trends    = _time_trends(df, cols)
     anomalies = _detect_anomalies(df, cols)
 
     kpis["trend_summary"] = _trend_summary(kpis, trends, anomalies)
 
+    top5_products  = _top_n(df, cols["product_col"],  cols["sales_col"], n=5)
+    top10_products = _top_n(df, cols["product_col"],  cols["sales_col"], n=10)
+    top5_regions   = _top_n(df, cols["region_col"],   cols["sales_col"], n=5)
+    cat_contrib    = _category_contribution(df, cols)
+
+    # ── Confidence guardrails ─────────────────────────────────────────────────
+    guardrail_warnings.extend(
+        _confidence_guardrails(df, cols, kpis, top5_regions)
+    )
+
     findings: dict[str, Any] = {
-        "dataset_name":         dataset_name,
-        "row_count":            int(len(df)),
-        "detected_columns":     cols,
-        "kpis":                 kpis,
-        "top_5_products":       _top_n(df, cols["product_col"],  cols["sales_col"], n=5),
-        "top_10_products":      _top_n(df, cols["product_col"],  cols["sales_col"], n=10),
-        "top_5_regions":        _top_n(df, cols["region_col"],   cols["sales_col"], n=5),
-        "category_contribution":_category_contribution(df, cols),
-        "best_worst_period":    _best_worst_period(df, cols),
-        "time_trends":          trends,
-        "pareto":               _pareto_analysis(df, cols),
-        "anomalies":            anomalies,
-        "seasonality_hint":     _seasonality_hint(trends),
+        "dataset_name":          dataset_name,
+        "row_count":             int(len(df)),
+        "detected_columns":      cols,
+        "reporting_window":      reporting_window,
+        "guardrail_warnings":    guardrail_warnings,
+        "kpis":                  kpis,
+        "top_5_products":        top5_products,
+        "top_10_products":       top10_products,
+        "top_5_regions":         top5_regions,
+        "category_contribution": cat_contrib,
+        "best_worst_period":     _best_worst_period(df, cols),
+        "time_trends":           trends,
+        "pareto":                _pareto_analysis(df, cols),
+        "anomalies":             anomalies,
+        "seasonality_hint":      _seasonality_hint(trends),
         "reporting_period": (
             f"{pd.to_datetime(df[cols['date_col']], errors='coerce').min().strftime('%b %d, %Y')} – "
             f"{pd.to_datetime(df[cols['date_col']], errors='coerce').max().strftime('%b %d, %Y')}"
         ) if cols["date_col"] else "All available data",
     }
 
+    if guardrail_warnings:
+        logger.warning("Guardrail warnings for %s: %s", dataset_name, guardrail_warnings)
     logger.info("Analytics engine complete: %s", dataset_name)
     return findings

@@ -60,6 +60,8 @@ def _build_prompt(findings: dict, charts: list[dict]) -> str:
         "anomalies":       anomalies[:5],  # send at most 5 to keep prompt tight
         "seasonality":     findings.get("seasonality_hint"),
         "chart_captions":  chart_captions,
+        "reporting_window": findings.get("reporting_window", {}),
+        "guardrail_warnings": findings.get("guardrail_warnings", []),
         "output_format": {
             "description": "Return a JSON object with exactly these 4 keys (string values only):",
             "keys": [
