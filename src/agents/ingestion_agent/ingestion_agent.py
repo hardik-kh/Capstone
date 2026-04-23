@@ -3,7 +3,10 @@
 import os
 import time
 import tempfile
-from typing import Any, Optional
+import asyncio
+import copy
+import inspect
+from typing import Any, Optional, Callable
 from datetime import datetime
 
 import pandas as pd
@@ -20,6 +23,7 @@ from agents.ingestion_agent.profiler import clean_and_profile
 from agents.statistical_agent.statistical_agent import run_statistical_tests
 from agents.eda_agent.eda_agent import run_eda
 from agents.predictive_agent.predictive_agent import run_predictive
+from agents.reporting_agent.reporting_agent import run_reporting
 
 logger = get_logger("DataIngestionAgent")
 
@@ -67,7 +71,22 @@ def _build_table_entry(
     }
 
 
-async def ingest_files(files: list) -> dict:
+async def _emit_progress(
+    progress_callback: Optional[Callable[[dict[str, Any]], Any]],
+    payload: dict[str, Any],
+) -> None:
+    if not progress_callback:
+        return
+    snapshot = copy.deepcopy(payload)
+    maybe_awaitable = progress_callback(snapshot)
+    if inspect.isawaitable(maybe_awaitable):
+        await maybe_awaitable
+
+
+async def ingest_files(
+    files: list,
+    progress_callback: Optional[Callable[[dict[str, Any]], Any]] = None,
+) -> dict:
     results: list[dict] = []
     errors: list[dict] = []
     processing_log: dict[str, Any] = {
@@ -77,6 +96,18 @@ async def ingest_files(files: list) -> dict:
     }
     csv_artifacts: list[dict[str, Any]] = []
     deferred_cleanup_paths: list[str] = []
+    payload: dict[str, Any] = {
+        "tables": [],
+        "errors": [],
+        "merge_results": [],
+        "statistical_results": [],
+        "eda_results": [],
+        "predictive_results": [],
+        "reporting_results": [],
+        "processing_log": processing_log,
+    }
+
+    await _emit_progress(progress_callback, payload)
 
     for file in files:
         logger.info(f"Processing file: {file.filename}")
@@ -130,6 +161,8 @@ async def ingest_files(files: list) -> dict:
                     meta={**meta, "bronze_info": bronze_info},
                     source_type="csv",
                 ))
+                payload["tables"] = results
+                await _emit_progress(progress_callback, payload)
 
             else:
                 sheets = load_excel(tmp_path)
@@ -149,6 +182,8 @@ async def ingest_files(files: list) -> dict:
                         source_type="excel",
                         sheet_name=sheet_name,
                     ))
+                    payload["tables"] = results
+                    await _emit_progress(progress_callback, payload)
                 file_log["status"] = "completed"
                 file_log["latency_seconds"] = round(time.time() - start_time, 4)
 
@@ -156,14 +191,18 @@ async def ingest_files(files: list) -> dict:
             err = e.to_dict()
             err["file"] = file.filename
             errors.append(err)
+            payload["errors"] = errors
             file_log["status"] = "failed"
             file_log["error"] = err
+            await _emit_progress(progress_callback, payload)
         except Exception as e:
             logger.exception(f"Unexpected error for file {file.filename}")
             err = {"file": file.filename, "error_code": "UNEXPECTED_ERROR", "message": "An unexpected error occurred.", "hint": str(e)}
             errors.append(err)
+            payload["errors"] = errors
             file_log["status"] = "failed"
             file_log["error"] = err
+            await _emit_progress(progress_callback, payload)
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -174,24 +213,28 @@ async def ingest_files(files: list) -> dict:
         merge_log_entry: dict[str, Any] = {"step": "merge_csv_files", "status": "started", "files": [a["filename"] for a in csv_artifacts]}
         processing_log["events"].append(merge_log_entry)
         try:
-            merge_results = merge_all_csv_files(csv_artifacts)
+            merge_results = await asyncio.to_thread(merge_all_csv_files, csv_artifacts)
             merge_log_entry["status"] = "completed"
+            payload["merge_results"] = merge_results
+            await _emit_progress(progress_callback, payload)
         except IngestionError as e:
             err = e.to_dict()
             err["file"] = ",".join(a["filename"] for a in csv_artifacts)
             errors.append(err)
+            payload["errors"] = errors
             merge_log_entry["status"] = "failed"
             merge_log_entry["error"] = err
+            await _emit_progress(progress_callback, payload)
         except Exception as e:
             err = {"file": ",".join(a["filename"] for a in csv_artifacts), "error_code": "UNEXPECTED_MERGE_ERROR", "message": "Merge failed.", "hint": str(e)}
             errors.append(err)
+            payload["errors"] = errors
             merge_log_entry["status"] = "failed"
             merge_log_entry["error"] = err
+            await _emit_progress(progress_callback, payload)
     else:
         processing_log["events"].append({"step": "merge_csv_files", "status": "skipped", "reason": "No CSV files ingested."})
-
-    processing_log["completed_at"] = datetime.utcnow().isoformat() + "Z"
-    processing_log["status"] = "completed_with_errors" if errors else "completed"
+        await _emit_progress(progress_callback, payload)
 
     for path in deferred_cleanup_paths:
         if os.path.exists(path):
@@ -247,16 +290,20 @@ async def ingest_files(files: list) -> dict:
 
         for dataset_name, df_stat in datasets_for_stats:
             logger.info("Running statistical tests on: %s", dataset_name)
-            stat_result = run_statistical_tests(dataset_name, df_stat)
+            stat_result = await asyncio.to_thread(run_statistical_tests, dataset_name, df_stat)
             statistical_results.append(stat_result)
+            payload["statistical_results"] = statistical_results
+            await _emit_progress(progress_callback, payload)
 
         stat_log_entry["status"] = "completed"
         stat_log_entry["datasets_analyzed"] = [r["dataset_name"] for r in statistical_results]
+        await _emit_progress(progress_callback, payload)
 
     except Exception as e:
         logger.exception("Statistical analysis step failed")
         stat_log_entry["status"] = "failed"
         stat_log_entry["error"] = str(e)
+        await _emit_progress(progress_callback, payload)
 
     # ── EDA ───────────────────────────────────────────────────────────────────
     # Always 3 plots per dataset — LLM picks the most useful ones automatically.
@@ -268,17 +315,21 @@ async def ingest_files(files: list) -> dict:
     try:
         for dataset_name, df_eda in datasets_for_stats:
             logger.info("Running EDA on: %s", dataset_name)
-            eda_result = run_eda(dataset_name, df_eda, n_plots=3)
+            eda_result = await asyncio.to_thread(run_eda, dataset_name, df_eda, 3)
             # Strip base64 from processing_log to keep it readable — still in eda_results
             eda_results.append(eda_result)
+            payload["eda_results"] = eda_results
+            await _emit_progress(progress_callback, payload)
 
         eda_log_entry["status"] = "completed"
         eda_log_entry["datasets_analyzed"] = [r["dataset_name"] for r in eda_results]
+        await _emit_progress(progress_callback, payload)
 
     except Exception as e:
         logger.exception("EDA step failed")
         eda_log_entry["status"] = "failed"
         eda_log_entry["error"] = str(e)
+        await _emit_progress(progress_callback, payload)
 
     # ── Predictive Analysis ───────────────────────────────────────────────────
     predictive_results: list[dict] = []
@@ -295,23 +346,61 @@ async def ingest_files(files: list) -> dict:
         for dataset_name, df_pred in datasets_for_stats:
             logger.info("Running predictive analysis on: %s", dataset_name)
             insights = eda_insights_lookup.get(dataset_name, {})
-            pred_result = run_predictive(dataset_name, df_pred, eda_insights=insights)
+            pred_result = await asyncio.to_thread(run_predictive, dataset_name, df_pred, insights)
             predictive_results.append(pred_result)
+            payload["predictive_results"] = predictive_results
+            await _emit_progress(progress_callback, payload)
 
         pred_log_entry["status"] = "completed"
         pred_log_entry["datasets_analyzed"] = [r["dataset_name"] for r in predictive_results]
+        await _emit_progress(progress_callback, payload)
 
     except Exception as e:
         logger.exception("Predictive analysis step failed")
         pred_log_entry["status"] = "failed"
         pred_log_entry["error"] = str(e)
+        await _emit_progress(progress_callback, payload)
 
-    return {
+    # ── Reporting ─────────────────────────────────────────────────────────────
+    reporting_results: list[dict] = []
+    report_log_entry: dict[str, Any] = {"step": "reporting", "status": "started"}
+    processing_log["events"].append(report_log_entry)
+
+    try:
+        eda_insights_for_report: dict[str, dict] = {
+            r["dataset_name"]: r.get("eda_insights", {})
+            for r in eda_results
+        }
+        for dataset_name, df_report in datasets_for_stats:
+            logger.info("Running reporting agent on: %s", dataset_name)
+            insights = eda_insights_for_report.get(dataset_name, {})
+            report_result = await asyncio.to_thread(run_reporting, dataset_name, df_report, insights)
+            reporting_results.append(report_result)
+            payload["reporting_results"] = reporting_results
+            await _emit_progress(progress_callback, payload)
+
+        report_log_entry["status"] = "completed"
+        report_log_entry["datasets_reported"] = [r["dataset_name"] for r in reporting_results]
+        await _emit_progress(progress_callback, payload)
+
+    except Exception as e:
+        logger.exception("Reporting step failed")
+        report_log_entry["status"] = "failed"
+        report_log_entry["error"] = str(e)
+        await _emit_progress(progress_callback, payload)
+
+    processing_log["completed_at"] = datetime.utcnow().isoformat() + "Z"
+    processing_log["status"] = "completed_with_errors" if errors else "completed"
+
+    final_payload = {
         "tables":              results,
         "errors":              errors,
         "merge_results":       merge_results,
         "statistical_results": statistical_results,
         "eda_results":         eda_results,
         "predictive_results":  predictive_results,
+        "reporting_results":   reporting_results,
         "processing_log":      processing_log,
     }
+    await _emit_progress(progress_callback, final_payload)
+    return final_payload

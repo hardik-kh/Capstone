@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from agents.ingestion_agent.router import router as ingestion_router
+from agents.reporting_agent.router import router as reporting_router
+
 
 app = FastAPI(
     title="Autonomous Analytics",
@@ -37,3 +39,4 @@ async def home():
 
 # Existing ingestion routes
 app.include_router(ingestion_router, prefix="/ingest", tags=["Data Ingestion"])
+app.include_router(reporting_router, prefix="/reporting", tags=["Reporting"])
