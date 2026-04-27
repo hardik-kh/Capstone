@@ -2310,6 +2310,7 @@ function renderStatSection(statResults) {
 // ── Predictive section ────────────────────────────────────────────────────────
 function renderPredictiveSection(predictResults) {
   const completed = predictResults.filter(r => r.status === 'completed');
+  const skipped = predictResults.filter(r => r.status === 'skipped');
   const total = predictResults.length;
 
   let html = `<div class="result-section">
@@ -2357,6 +2358,7 @@ function renderPredictiveSection(predictResults) {
           ${m.wape_pct != null ? `<div class="pred-metric"><div class="pred-metric-label">WAPE</div><div class="pred-metric-value">${m.wape_pct.toFixed(1)}%</div><div class="pred-metric-sub">Error rate</div></div>` : ''}
           ${score != null ? `<div class="pred-metric"><div class="pred-metric-label">Score</div><div class="pred-metric-value" style="color:${scoreColor}">${score.toFixed(1)}%</div><div class="pred-metric-sub">100 − WAPE</div></div>` : ''}
         </div>
+        ${(!pr.metrics_reliable && pr.quality_note) ? `<div style="margin-top:12px;padding:10px 12px;background:var(--amber-100);border:1px solid #fcd34d;border-radius:10px;font-size:12px;color:#92400e;">⚠️ ${pr.quality_note}</div>` : ''}
         ${pr.plan_reason ? `<div class="pred-reason">💡 ${pr.plan_reason}</div>` : ''}
       </div>
 
@@ -2378,14 +2380,20 @@ function renderPredictiveSection(predictResults) {
 
       ${(pr.selected_features && pr.selected_features.length > 0 && !isTimeSeries) ? `
       <div style="margin-top:16px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);padding:16px 20px;">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--gray-400);margin-bottom:10px;">Features Used</div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;">${pr.selected_features.slice(0,15).map(f=>`<span style="padding:3px 10px;background:white;border:1px solid var(--gray-200);border-radius:999px;font-size:12px;font-family:'DM Mono',monospace;color:var(--gray-600);">${f}</span>`).join('')}</div>
       </div>` : ''}
+    </div>`;
+  });
+
+  // Skipped ones
+  skipped.forEach(pr => {
+    html += `<div style="padding:14px 16px;background:var(--amber-100);border-radius:var(--radius-sm);margin-bottom:12px;font-size:13px;color:#92400e;">
+      ⏭️ <strong>${pr.dataset_name || 'Dataset'}</strong>: ${pr.error || 'Prediction skipped'}
     </div>`;
   });
 
   // Failed ones
   predictResults.filter(r => r.status !== 'completed').forEach(pr => {
+    if (pr.status === 'skipped') return;
     html += `<div style="padding:14px 16px;background:var(--red-100);border-radius:var(--radius-sm);margin-bottom:12px;font-size:13px;color:var(--red-500);">
       ❌ <strong>${pr.dataset_name}</strong>: ${pr.error || 'Prediction failed'}
     </div>`;
@@ -2426,9 +2434,6 @@ function renderReportingSection(reportResults) {
       <div style="border:1px solid var(--gray-200);border-radius:var(--radius);overflow:hidden;background:#fff;">
         <iframe src="${previewUrl}" title="Report preview for ${dataset}" style="width:100%;height:820px;border:0;display:block;"></iframe>
       </div>
-      ${!hasPdf ? `<div style="margin-top:10px;padding:10px 12px;background:var(--amber-100);border-radius:var(--radius-sm);font-size:12px;color:#92400e;">
-        PDF file is not available yet. Open Report still works, and your browser can save it as PDF.
-      </div>` : ''}
     </div>`;
   });
 
@@ -2911,5 +2916,3 @@ function getDemoData() {
 </script>
 </body>
 </html>
-
-

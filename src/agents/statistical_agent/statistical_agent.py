@@ -12,13 +12,13 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from core.config import (
+from src.core.config import (
     AZURE_OPENAI_ENDPOINT,
     AZURE_OPENAI_API_KEY,
     AZURE_OPENAI_DEPLOYMENT_NAME,
     AZURE_OPENAI_API_VERSION,
 )
-from core.logger import get_logger
+from src.core.logger import get_logger
 
 logger = get_logger("StatisticalAgent")
 
@@ -184,6 +184,7 @@ def _select_tests_with_llm(dataset_name: str, schema: dict) -> list:
             elif col_name in numeric_cols and unique_count <= max(50, row_count * 0.05):
                 valid_group_cols.add(col_name)
 
+        col_non_null_counts = {c["name"]: int(c.get("non_null_count", 0)) for c in schema.get("columns", [])}
         valid = []
         for t in tests:
             test_type = t.get("test_type", "")
@@ -206,6 +207,18 @@ def _select_tests_with_llm(dataset_name: str, schema: dict) -> list:
             if test_type == "adfuller" and not all(c in numeric_cols for c in columns):
                 logger.warning("Skipping adfuller — non-numeric column in columns list: %s", columns)
                 continue
+            if test_type == "adfuller":
+                # ADF needs a single numeric series with enough observations.
+                adf_candidates = [c for c in columns if c in numeric_cols]
+                if value_col and value_col in numeric_cols:
+                    adf_candidates.append(value_col)
+                has_sufficient_series = any(col_non_null_counts.get(c, 0) >= 12 for c in adf_candidates)
+                if not has_sufficient_series:
+                    logger.warning(
+                        "Skipping adfuller — no numeric series with 12+ observations in %s",
+                        adf_candidates,
+                    )
+                    continue
 
             # Correlation tests must use numeric columns
             if test_type in ("pearsonr", "spearmanr", "kendalltau") and not all(c in numeric_cols for c in columns):
@@ -252,12 +265,15 @@ def _heuristic_test_selection(schema: dict) -> list:
             "columns": numeric[:2],
             "reason": f"Check whether {numeric[0]} and {numeric[1]} move together.",
         })
-    if datetime_cols and len(numeric) >= 1:
+    non_null_map = {c["name"]: int(c.get("non_null_count", 0)) for c in schema.get("columns", [])}
+    adf_candidate = next((c for c in numeric if non_null_map.get(c, 0) >= 12), None)
+
+    if datetime_cols and adf_candidate:
         tests.append({
             "test_id": "trend_stationarity",
             "test_type": "adfuller",
-            "columns": [numeric[0]],
-            "reason": f"Check whether {numeric[0]} has a stable trend over time.",
+            "columns": [adf_candidate],
+            "reason": f"Check whether {adf_candidate} has a stable trend over time.",
         })
     elif categorical and len(numeric) >= 1:
         tests.append({
@@ -716,6 +732,22 @@ def run_statistical_tests(dataset_name: str, df: pd.DataFrame) -> dict:
         selected_tests = _select_tests_with_llm(dataset_name, schema)
     except Exception as e:
         logger.error("Test selection failed: %s", e)
+
+    # Final runtime guard: drop tests that are invalid for actual coerced data.
+    filtered_tests = []
+    for t in selected_tests:
+        if t.get("test_type") == "adfuller":
+            cols = t.get("columns", []) or []
+            value_col = t.get("value_column")
+            candidates = [c for c in cols if c in df.columns]
+            if value_col and value_col in df.columns and value_col not in candidates:
+                candidates.append(value_col)
+            has_series = any(len(pd.to_numeric(df[c], errors="coerce").dropna()) >= 12 for c in candidates)
+            if not has_series:
+                logger.info("Dropping adfuller at runtime for %s (insufficient numeric observations).", dataset_name)
+                continue
+        filtered_tests.append(t)
+    selected_tests = filtered_tests
 
     if not selected_tests:
         return {

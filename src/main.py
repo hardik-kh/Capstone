@@ -1,8 +1,18 @@
+import sys
+from pathlib import Path
+
+# Support both launch modes:
+# 1) project root: `uvicorn src.main:app --reload`
+# 2) src directory: `uvicorn main:app --reload`
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from agents.ingestion_agent.router import router as ingestion_router
-from agents.reporting_agent.router import router as reporting_router
+from src.agents.ingestion_agent.router import router as ingestion_router
+from src.agents.reporting_agent.router import router as reporting_router
 
 
 app = FastAPI(

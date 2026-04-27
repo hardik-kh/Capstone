@@ -13,14 +13,14 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from core.config import (
+from src.core.config import (
     AZURE_OPENAI_API_KEY,
     AZURE_OPENAI_API_VERSION,
     AZURE_OPENAI_DEPLOYMENT_NAME,
     AZURE_OPENAI_ENDPOINT,
     PROCESSED_OUTPUT_DIR,
 )
-from core.logger import get_logger
+from src.core.logger import get_logger
 
 logger = get_logger("PredictiveAgent")
 
@@ -29,7 +29,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # ── Sampling thresholds ───────────────────────────────────────────────────────
 XGBOOST_ROW_CAP      = 50_000   # rows above this → time-based sample
-TIMESERIES_POINT_CAP = 3_650    # daily points for SARIMA / Prophet (10 years max — let statsmodels decide speed)
+TIMESERIES_POINT_CAP = 3_650    # daily points for SARIMA / Prophet (10-year cap)
+MIN_ROWS_FOR_PREDICTIVE = 12
+MIN_TEST_ROWS_FOR_RELIABLE_METRICS = 5
 
 # ── Model registry ────────────────────────────────────────────────────────────
 
@@ -442,7 +444,13 @@ def _sample_for_speed(df: pd.DataFrame, date_col: Optional[str], model_name: str
 def _split(df: pd.DataFrame, date_col: Optional[str], ratio: float = 0.8) -> tuple[pd.DataFrame, pd.DataFrame]:
     if date_col and date_col in df.columns:
         df = df.sort_values(date_col).reset_index(drop=True)
-    cutoff = max(1, int(len(df) * ratio))
+    n = len(df)
+    if n <= 1:
+        return df.iloc[:0].copy(), df.copy()
+    min_test = min(MIN_TEST_ROWS_FOR_RELIABLE_METRICS, n - 1)
+    test_size = max(min_test, int(round(n * (1 - ratio))))
+    test_size = min(test_size, n - 1)
+    cutoff = n - test_size
     return df.iloc[:cutoff].copy(), df.iloc[cutoff:].copy()
 
 
@@ -989,6 +997,16 @@ def run_predictive(
         logger.info("Dataset sampled for speed: %d rows → %d", len(df), len(df_model))
 
     # ── Train / test split ────────────────────────────────────────────────────
+    if len(df_model) < MIN_ROWS_FOR_PREDICTIVE:
+        return {
+            "dataset_name": dataset_name,
+            "status": "skipped",
+            "error": (
+                f"Not enough rows for predictive modelling. "
+                f"Need at least {MIN_ROWS_FOR_PREDICTIVE} rows after cleaning; got {len(df_model)}."
+            ),
+            "duration_seconds": round(time.time() - started_at, 4),
+        }
     train_df, test_df = _split(df_model, date_col)
 
     if len(test_df) == 0:
@@ -1024,6 +1042,16 @@ def run_predictive(
     y_true = test_df[target].reset_index(drop=True)
     y_pred = preds.reset_index(drop=True)
     metrics = _compute_metrics(y_true, y_pred)
+    metrics_reliable = len(test_df) >= MIN_TEST_ROWS_FOR_RELIABLE_METRICS
+    quality_note = None
+    if not metrics_reliable:
+        quality_note = (
+            f"Only {len(test_df)} test rows were available. "
+            "Metrics are unstable; treat this as directional only."
+        )
+        metrics["r2"] = None
+        metrics["score_pct"] = None
+
 
     # ── Build chart_data for frontend ─────────────────────────────────────────
     # Combine train actuals + test actuals + test predictions into a compact payload
@@ -1077,9 +1105,11 @@ def run_predictive(
         logger.warning("Could not save predictions: %s", e)
 
     duration = round(time.time() - started_at, 4)
+    score_for_log = metrics.get("score_pct")
+    score_label = "N/A" if score_for_log is None else f"{float(score_for_log):.1f}%"
     logger.info(
-        "Predictive complete: %s — model=%s target=%s score=%.1f%% in %.2fs",
-        dataset_name, model_name, target, metrics["score_pct"], duration,
+        "Predictive complete: %s — model=%s target=%s score=%s in %.2fs",
+        dataset_name, model_name, target, score_label, duration,
     )
 
     return {
@@ -1091,6 +1121,8 @@ def run_predictive(
         "train_rows":        len(train_df),
         "test_rows":         len(test_df),
         "was_sampled":       was_sampled,
+        "metrics_reliable":  metrics_reliable,
+        "quality_note":      quality_note,
         "metrics":           metrics,
         "chart_data":        chart_data,
         "predictions_path":  predictions_path,
@@ -1098,3 +1130,4 @@ def run_predictive(
         "duration_seconds":  duration,
         "status":            "completed",
     }
+

@@ -8,8 +8,8 @@ import urllib.parse
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
-from core.config import DATA_DIR
-from core.logger import get_logger
+from src.core.config import DATA_DIR
+from src.core.logger import get_logger
 
 logger = get_logger("ReportingRouter")
 

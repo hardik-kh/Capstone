@@ -8,13 +8,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.config import (
+from src.core.config import (
     AZURE_OPENAI_ENDPOINT,
     AZURE_OPENAI_API_KEY,
     AZURE_OPENAI_DEPLOYMENT_NAME,
     AZURE_OPENAI_API_VERSION,
 )
-from core.logger import get_logger
+from src.core.logger import get_logger
 
 logger = get_logger("LLMReportWriter")
 
@@ -51,14 +51,21 @@ def _build_prompt(findings: dict, charts: list[dict]) -> str:
             "growth_over_prior_period": kpis.get("growth_over_previous_period"),
             "trend_summary":            kpis.get("trend_summary"),
         },
-        "top_5_products":  [{"name": p["name"], "sales": p["sales"], "share_pct": p["share_pct"]} for p in top_products],
-        "top_5_regions":   [{"name": r["name"], "sales": r["sales"], "share_pct": r["share_pct"]} for r in top_regions],
+        "top_5_products":  [
+            {"name": p.get("name"), "value": p.get("sales", p.get("value")), "share_pct": p.get("share_pct")}
+            for p in top_products
+        ],
+        "top_5_regions":   [
+            {"name": r.get("name"), "value": r.get("sales", r.get("value")), "share_pct": r.get("share_pct")}
+            for r in top_regions
+        ],
         "top_5_categories":[{"name": c["name"], "share_pct": c["share_pct"]} for c in top_cats],
         "best_period":     bw_period.get("best_period"),
         "worst_period":    bw_period.get("worst_period"),
         "pareto_insight":  pareto,
         "anomalies":       anomalies[:5],  # send at most 5 to keep prompt tight
         "seasonality":     findings.get("seasonality_hint"),
+        "eda_insights":    findings.get("eda_insights", {}),
         "chart_captions":  chart_captions,
         "reporting_window": findings.get("reporting_window", {}),
         "guardrail_warnings": findings.get("guardrail_warnings", []),
@@ -130,8 +137,10 @@ def _fallback_sections(findings: dict) -> dict[str, str]:
     orders_str  = f"{orders:,}" if orders is not None else "N/A"
     growth_str  = (f"{growth:+.1f}%" if growth is not None else "N/A")
 
-    top_product = findings.get("top_5_products", [{}])[0].get("name", "N/A")
-    top_region  = findings.get("top_5_regions",  [{}])[0].get("name", "N/A")
+    top_products = findings.get("top_5_products") or []
+    top_regions = findings.get("top_5_regions") or []
+    top_product = top_products[0].get("name", "N/A") if top_products else "N/A"
+    top_region = top_regions[0].get("name", "N/A") if top_regions else "N/A"
     anomalies   = findings.get("anomalies", [])
     bw          = findings.get("best_worst_period", {})
     best_p      = bw.get("best_period", {}).get("period", "N/A")

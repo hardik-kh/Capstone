@@ -11,8 +11,8 @@ from typing import Any
 
 import pandas as pd
 
-from agents.ingestion_agent.csv_handler import detect_delimiter, detect_encoding
-from core.config import (
+from src.agents.ingestion_agent.csv_handler import detect_delimiter, detect_encoding
+from src.core.config import (
     MERGED_OUTPUT_DIR,
     MERGE_SAMPLE_ROWS,
     AZURE_OPENAI_ENDPOINT,
@@ -20,8 +20,8 @@ from core.config import (
     AZURE_OPENAI_DEPLOYMENT_NAME,
     AZURE_OPENAI_API_VERSION,
 )
-from core.exceptions import MergeInferenceError
-from core.logger import get_logger
+from src.core.exceptions import MergeInferenceError
+from src.core.logger import get_logger
 
 logger = get_logger("MergeService")
 

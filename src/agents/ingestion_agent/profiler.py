@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from core.config import MAX_PREVIEW_ROWS, MAX_CATEGORY_VALUES
+from src.core.config import MAX_PREVIEW_ROWS, MAX_CATEGORY_VALUES
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:

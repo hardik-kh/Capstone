@@ -12,7 +12,7 @@ from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from agents.ingestion_agent.ingestion_agent import ingest_files
+from src.agents.ingestion_agent.ingestion_agent import ingest_files
 
 router = APIRouter()
 

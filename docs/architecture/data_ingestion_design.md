@@ -1,68 +1,48 @@
-# Data Ingestion Agent  
-### Cleaning, Profiling, and Preparing Data for Autonomous Analytics
+# Data Ingestion Design
 
-The Data Ingestion Agent is the foundation of the Autonomous Analytics Platform. It transforms raw uploaded files into **clean, structured, profiled datasets** that downstream agents can consume without manual intervention.
+## Design Goals
 
-This agent is deterministic, fast, and built using FastAPI + Pandas.
+- Accept mixed CSV/Excel uploads safely.
+- Support large CSV workloads without exhausting memory.
+- Produce consistent profiling metadata for downstream agents.
+- Preserve staged/raw artifacts for reproducibility.
+- Continue processing when individual files fail.
 
----
+## Core Components
 
-# 🎯 Responsibilities
+- `router.py`: FastAPI endpoints and async job polling.
+- `ingestion_agent.py`: end-to-end orchestration.
+- `csv_handler.py`: CSV detection/read and bronze persistence.
+- `excel_handler.py`: workbook/sheet loading and bronze persistence.
+- `validators.py`: file-level and row-level validation metrics.
+- `profiler.py`: cleaning + profiling outputs.
+- `merge_service.py`: pairwise CSV merge inference/execution via DuckDB.
 
-### 1. File Intake
-- Accept multiple uploaded files (CSV, XLSX, XLS)
-- Validate file extensions and sizes
-- Save uploads to temporary storage
+## Key Design Choices
 
-### 2. File Parsing
-- CSV:
-  - Encoding detection (UTF‑8, Latin‑1, CP1252)
-  - Delimiter detection (comma, tab, semicolon, pipe)
-- Excel:
-  - Multi‑sheet loading
-  - Each sheet becomes a separate table
+### Upload streaming
 
----
+Uploads are written to temp files in chunks to avoid loading entire payloads into memory.
 
-# 🧹 Data Cleaning
+### Large CSV strategy
 
-The ingestion agent performs **automatic corrective actions**:
+For files above threshold:
+- profile from sampled rows
+- copy full file directly to bronze CSV
+- still allow merge on original staged file
 
-| Issue | Action |
-|-------|--------|
-| Missing numeric values | Fill with median |
-| Missing categorical values | Fill with mode or `"unknown"` |
-| Duplicate rows | Remove |
-| Outliers | Clip using IQR |
-| Date columns | Auto‑convert to datetime |
-| Column names | Normalize to snake_case |
+### Cleaning/profile contract
 
-These actions ensure downstream agents receive **clean, consistent, analysis‑ready data**.
+Profiling returns schema/summary/preview and quality metrics. Outliers are detected and reported, not modified.
 
----
+### Merge strategy
 
-# 📊 Profiling
+- Works across all unique CSV pairs for N uploaded CSV files.
+- Uses Azure OpenAI merge-key inference with heuristic fallback.
+- Uses DuckDB streaming joins and fan-out guardrails.
 
-Each dataset is profiled to generate metadata used by ETL, EDA, Statistical Testing, and Modeling agents.
+### Resilience
 
-### Profiling Includes:
-- Shape before/after cleaning  
-- Missing values before/after  
-- Data types  
-- Numeric summary statistics  
-- Categorical distributions  
-- Data preview (first 10 rows)  
-
----
-
-# ⚠️ Error Handling
-
-All errors follow a structured schema:
-
-```json
-{
-  "file": "train.csv",
-  "error_code": "FILE_READ_ERROR",
-  "message": "Failed to read file 'train.csv'.",
-  "hint": "Details: Error tokenizing data..."
-}
+- Structured errors are collected in `errors`.
+- Pipeline continues across files and stages where possible.
+- Progress snapshots are emitted for async job polling.

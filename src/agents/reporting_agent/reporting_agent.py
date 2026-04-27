@@ -11,12 +11,12 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from core.config import DATA_DIR
-from core.logger import get_logger
-from agents.reporting_agent.analytics_engine import run_analytics
-from agents.reporting_agent.chart_generator import generate_charts
-from agents.reporting_agent.llm_writer import write_report_sections
-from agents.reporting_agent.report_composer import compose_report
+from src.core.config import DATA_DIR
+from src.core.logger import get_logger
+from src.agents.reporting_agent.analytics_engine import run_analytics
+from src.agents.reporting_agent.chart_generator import generate_charts
+from src.agents.reporting_agent.llm_writer import write_report_sections
+from src.agents.reporting_agent.report_composer import compose_report
 
 logger = get_logger("ReportingAgent")
 
@@ -27,6 +27,7 @@ def run_reporting(
     dataset_name: str,
     df: pd.DataFrame,
     eda_insights: Optional[dict] = None,
+    reporting_months: int = 0,
 ) -> dict[str, Any]:
     """
     Main entry point for the Reporting / Insights Agent.
@@ -35,6 +36,7 @@ def run_reporting(
         dataset_name: Human-readable name used in titles and file paths.
         df:           The DataFrame to analyse (full dataset).
         eda_insights: Optional insights dict from the EDA agent.
+        reporting_months: Optional trailing window size in months for date-based reports.
 
     Returns a dict with:
         - dataset_name
@@ -56,7 +58,8 @@ def run_reporting(
 
     try:
         # ── Step 1: Analytics engine ──────────────────────────────────────────
-        findings = run_analytics(dataset_name, df)
+        findings = run_analytics(dataset_name, df, reporting_months=reporting_months)
+        findings["eda_insights"] = eda_insights or {}
         logger.info("Analytics engine complete for %s", dataset_name)
 
         # ── Step 2: Chart generation ──────────────────────────────────────────

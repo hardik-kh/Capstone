@@ -1,321 +1,269 @@
-# Analytics Engine
-# - Auto-detects sales, order, date, region, category, product columns
-# - Computes all core KPIs and segmentation analyses
-# - Pure pandas — no I/O, no LLM calls
-# - Returns a single structured `findings` dict consumed by chart_generator and llm_writer
+"""Generalized analytics engine for reporting.
+
+Design goals:
+- Work across arbitrary business datasets (not just sales schemas).
+- Avoid picking ID-like columns as the primary metric.
+- Use robust fallbacks when semantic hints are missing.
+- Return stable, structured outputs for charting and report composition.
+"""
 
 from __future__ import annotations
 
-import calendar
-import warnings
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
-from core.logger import get_logger
+from src.core.logger import get_logger
 
 logger = get_logger("AnalyticsEngine")
 
-warnings.filterwarnings("ignore", category=FutureWarning)
 
+METRIC_HINTS = [
+    "sales",
+    "revenue",
+    "amount",
+    "total",
+    "price",
+    "value",
+    "gmv",
+    "income",
+    "transaction",
+    "transactions",
+    "count",
+    "qty",
+    "quantity",
+    "units",
+    "volume",
+]
+ID_HINTS = ["id", "_id", "code", "key", "index", "nbr", "num", "no"]
+DATE_HINTS = ["date", "time", "timestamp", "created", "updated", "month", "year"]
 
-# ── Column detection ──────────────────────────────────────────────────────────
-
-_SALES_HINTS    = ["sales", "revenue", "amount", "total", "price", "value", "gmv", "income"]
-_ORDER_HINTS    = ["order_id", "orderid", "order id", "transaction_id", "txn_id", "invoice"]
-_PRODUCT_HINTS  = ["product", "item", "sku", "article", "good", "service", "name"]
-_REGION_HINTS   = ["region", "country", "state", "city", "territory", "zone", "location", "area", "store"]
-_CATEGORY_HINTS = ["category", "segment", "department", "division", "type", "class", "group", "channel"]
-_DATE_HINTS     = ["date", "time", "period", "day", "week", "month", "year", "created", "ordered", "shipped"]
-_QTY_HINTS      = ["qty", "quantity", "units", "count", "volume", "pieces", "sold"]
-
-
-def _match_col(df: pd.DataFrame, hints: list[str], numeric_only: bool = False) -> Optional[str]:
-    """Return the first column whose lowercased name contains any hint keyword."""
-    cols = df.columns.tolist()
-    if numeric_only:
-        cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
-    for hint in hints:
-        for col in cols:
-            if hint in col.lower().replace(" ", "_"):
-                return col
-    return None
-
-
-def _detect_columns(df: pd.DataFrame) -> dict[str, Optional[str]]:
-    """Auto-detect the semantic role of columns."""
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    object_cols  = df.select_dtypes(include=["object", "category"]).columns.tolist()
-    date_cols    = df.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns.tolist()
-
-    # Also try parsing object cols that look like dates
-    if not date_cols:
-        for col in object_cols:
-            sample = df[col].dropna().head(10).astype(str)
-            try:
-                parsed = pd.to_datetime(sample, errors="coerce")
-                if parsed.notna().sum() >= 7:
-                    date_cols.append(col)
-            except Exception:
-                pass
-
-    # Sales column: best-matching numeric by name, else highest-sum numeric
-    sales_col = _match_col(df, _SALES_HINTS, numeric_only=True)
-    if sales_col is None and numeric_cols:
-        sales_col = df[numeric_cols].sum().idxmax()
-
-    # Quantity column
-    qty_col = _match_col(df, _QTY_HINTS, numeric_only=True)
-    if qty_col == sales_col:
-        qty_col = None
-
-    detected = {
-        "sales_col":    sales_col,
-        "order_col":    _match_col(df, _ORDER_HINTS),
-        "product_col":  _match_col(df, _PRODUCT_HINTS),
-        "region_col":   _match_col(df, _REGION_HINTS),
-        "category_col": _match_col(df, _CATEGORY_HINTS),
-        "date_col":     date_cols[0] if date_cols else None,
-        "qty_col":      qty_col,
-    }
-    logger.info("Detected columns: %s", {k: v for k, v in detected.items() if v})
-    return detected
-
-
-# ── KPI computation ───────────────────────────────────────────────────────────
-
-def _compute_kpis(df: pd.DataFrame, cols: dict) -> dict[str, Any]:
-    sales_col = cols["sales_col"]
-    kpis: dict[str, Any] = {}
-
-    if sales_col:
-        kpis["total_sales"]  = round(float(df[sales_col].sum()), 2)
-        kpis["average_order_value"] = round(float(df[sales_col].mean()), 2)
-    else:
-        kpis["total_sales"] = None
-        kpis["average_order_value"] = None
-
-    kpis["total_orders"] = int(df[cols["order_col"]].nunique()) if cols["order_col"] else int(len(df))
-    kpis["units_sold"]   = int(df[cols["qty_col"]].sum()) if cols["qty_col"] else int(len(df))
-
-    # Period-over-period growth (requires date)
-    kpis["growth_over_previous_period"] = None
-    if sales_col and cols["date_col"]:
-        try:
-            tmp = df.copy()
-            tmp["_date"] = pd.to_datetime(tmp[cols["date_col"]], errors="coerce")
-            tmp = tmp.dropna(subset=["_date"])
-            midpoint = tmp["_date"].min() + (tmp["_date"].max() - tmp["_date"].min()) / 2
-            first_half  = tmp[tmp["_date"] <= midpoint][sales_col].sum()
-            second_half = tmp[tmp["_date"] >  midpoint][sales_col].sum()
-            if first_half and first_half != 0:
-                growth = round(((second_half - first_half) / first_half) * 100, 2)
-                kpis["growth_over_previous_period"] = growth
-        except Exception as e:
-            logger.warning("Growth calc failed: %s", e)
-
-    return kpis
-
-
-# ── Dimension rankings ────────────────────────────────────────────────────────
-
-def _top_n(df: pd.DataFrame, dim_col: str, sales_col: str, n: int = 5) -> list[dict]:
-    if not dim_col or not sales_col or dim_col not in df.columns:
-        return []
-    grouped = (
-        df.groupby(dim_col, observed=True)[sales_col]
-        .sum()
-        .sort_values(ascending=False)
-        .head(n)
-        .reset_index()
-    )
-    total = df[sales_col].sum() or 1
-    result = []
-    for _, row in grouped.iterrows():
-        result.append({
-            "name":  str(row[dim_col]),
-            "sales": round(float(row[sales_col]), 2),
-            "share_pct": round(float(row[sales_col]) / total * 100, 2),
-        })
-    return result
-
-
-def _category_contribution(df: pd.DataFrame, cols: dict) -> list[dict]:
-    if not cols["category_col"] or not cols["sales_col"]:
-        return []
-    return _top_n(df, cols["category_col"], cols["sales_col"], n=20)
-
-
-def _best_worst_period(df: pd.DataFrame, cols: dict) -> dict:
-    if not cols["date_col"] or not cols["sales_col"]:
-        return {}
-    try:
-        tmp = df.copy()
-        tmp["_date"] = pd.to_datetime(tmp[cols["date_col"]], errors="coerce")
-        tmp = tmp.dropna(subset=["_date"])
-        monthly = (
-            tmp.groupby(tmp["_date"].dt.to_period("M"))[cols["sales_col"]]
-            .sum()
-            .sort_values()
-        )
-        if monthly.empty:
-            return {}
-        return {
-            "best_period":  {"period": str(monthly.index[-1]), "sales": round(float(monthly.iloc[-1]), 2)},
-            "worst_period": {"period": str(monthly.index[0]),  "sales": round(float(monthly.iloc[0]),  2)},
-        }
-    except Exception as e:
-        logger.warning("Best/worst period failed: %s", e)
-        return {}
-
-
-# ── Time trends ───────────────────────────────────────────────────────────────
-
-def _time_trends(df: pd.DataFrame, cols: dict) -> dict[str, Any]:
-    if not cols["date_col"] or not cols["sales_col"]:
-        return {}
-    try:
-        tmp = df.copy()
-        tmp["_date"] = pd.to_datetime(tmp[cols["date_col"]], errors="coerce")
-        tmp = tmp.dropna(subset=["_date"]).sort_values("_date")
-        sc = cols["sales_col"]
-
-        daily   = tmp.groupby("_date")[sc].sum().reset_index()
-        weekly  = tmp.groupby(tmp["_date"].dt.to_period("W"))[sc].sum().reset_index()
-        monthly = tmp.groupby(tmp["_date"].dt.to_period("M"))[sc].sum().reset_index()
-
-        def to_records(frame: pd.DataFrame) -> list[dict]:
-            frame = frame.copy()
-            frame.columns = ["period", "sales"]
-            frame["period"] = frame["period"].astype(str)
-            frame["sales"]  = frame["sales"].round(2)
-            return frame.to_dict("records")
-
-        # Trend direction from linear regression on monthly
-        trend_direction = "flat"
-        if len(monthly) >= 3:
-            x = np.arange(len(monthly))
-            y = monthly[sc].values.astype(float)
-            slope = np.polyfit(x, y, 1)[0]
-            if slope > 0.01 * y.mean():
-                trend_direction = "upward"
-            elif slope < -0.01 * y.mean():
-                trend_direction = "downward"
-
-        return {
-            "daily":           to_records(daily),
-            "weekly":          to_records(weekly),
-            "monthly":         to_records(monthly),
-            "trend_direction": trend_direction,
-            "data_range_days": int((tmp["_date"].max() - tmp["_date"].min()).days),
-        }
-    except Exception as e:
-        logger.warning("Time trends failed: %s", e)
-        return {}
-
-
-# ── Pareto / concentration ────────────────────────────────────────────────────
-
-def _pareto_analysis(df: pd.DataFrame, cols: dict) -> dict:
-    """What % of sales come from the top 20% of products."""
-    if not cols["product_col"] or not cols["sales_col"]:
-        return {}
-    try:
-        by_product = df.groupby(cols["product_col"], observed=True)[cols["sales_col"]].sum().sort_values(ascending=False)
-        total = by_product.sum()
-        top_20_count = max(1, int(len(by_product) * 0.20))
-        top_20_sales = by_product.head(top_20_count).sum()
-        return {
-            "top_20pct_products_count": top_20_count,
-            "top_20pct_sales_share":    round(float(top_20_sales / total * 100), 2) if total else None,
-            "total_products":           int(len(by_product)),
-        }
-    except Exception as e:
-        logger.warning("Pareto analysis failed: %s", e)
-        return {}
-
-
-# ── Anomaly detection ─────────────────────────────────────────────────────────
-
-def _detect_anomalies(df: pd.DataFrame, cols: dict) -> list[dict]:
-    """IQR-based anomaly detection on monthly sales totals."""
-    if not cols["date_col"] or not cols["sales_col"]:
-        return []
-    try:
-        tmp = df.copy()
-        tmp["_date"] = pd.to_datetime(tmp[cols["date_col"]], errors="coerce")
-        tmp = tmp.dropna(subset=["_date"])
-        monthly = tmp.groupby(tmp["_date"].dt.to_period("M"))[cols["sales_col"]].sum()
-        if len(monthly) < 4:
-            return []
-        q1, q3 = monthly.quantile(0.25), monthly.quantile(0.75)
-        iqr = q3 - q1
-        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        anomalies = []
-        for period, val in monthly.items():
-            if val < lower or val > upper:
-                anomalies.append({
-                    "period": str(period),
-                    "sales":  round(float(val), 2),
-                    "type":   "high" if val > upper else "low",
-                })
-        return anomalies
-    except Exception as e:
-        logger.warning("Anomaly detection failed: %s", e)
-        return []
-
-
-# ── Seasonality hint ──────────────────────────────────────────────────────────
-
-def _seasonality_hint(trends: dict) -> Optional[str]:
-    """Simple month-of-year variance check to hint at seasonality."""
-    monthly = trends.get("monthly", [])
-    if len(monthly) < 13:
-        return None
-    try:
-        records = pd.DataFrame(monthly)
-        try:
-            records["month"] = pd.PeriodIndex(records["period"].astype(str), freq="M").month
-        except Exception:
-            records["month"] = pd.to_datetime(records["period"].astype(str), errors="coerce").dt.month
-        records = records.dropna(subset=["month"])
-        records["month"] = records["month"].astype(int)
-        monthly_mean = records.groupby("month")["sales"].mean()
-        cv = monthly_mean.std() / monthly_mean.mean() if monthly_mean.mean() else 0
-        if cv > 0.15:
-            peak_month = monthly_mean.idxmax()
-            import calendar
-            return f"Possible seasonality detected — peak month is typically {calendar.month_name[peak_month]}."
-        return "No strong seasonality pattern detected in available history."
-    except Exception:
-        return None
-
-
-# ── Trend summary (plain English) ─────────────────────────────────────────────
-
-def _trend_summary(kpis: dict, trends: dict, anomalies: list) -> str:
-    parts = []
-    direction = trends.get("trend_direction", "flat")
-    parts.append(f"Sales trend is {direction}.")
-    growth = kpis.get("growth_over_previous_period")
-    if growth is not None:
-        label = "grew" if growth >= 0 else "declined"
-        parts.append(f"Revenue {label} {abs(growth):.1f}% versus the prior period.")
-    if anomalies:
-        highs = [a for a in anomalies if a["type"] == "high"]
-        lows  = [a for a in anomalies if a["type"] == "low"]
-        if highs:
-            parts.append(f"{len(highs)} unusually high period(s) detected ({', '.join(a['period'] for a in highs[:2])}).")
-        if lows:
-            parts.append(f"{len(lows)} unusually low period(s) detected ({', '.join(a['period'] for a in lows[:2])}).")
-    return " ".join(parts)
-
-
-# ── Time-period guardrail ─────────────────────────────────────────────────────
 
 MAX_MONTHS = 60
 MIN_MONTHS = 6
+
+
+def _norm(name: str) -> str:
+    return str(name).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _is_probable_id(series: pd.Series, col_name: str) -> bool:
+    n = _norm(col_name)
+    if any(h in n for h in ID_HINTS):
+        return True
+    non_null = pd.to_numeric(series, errors="coerce").dropna()
+    if non_null.empty:
+        return False
+    unique_ratio = non_null.nunique(dropna=True) / max(1, len(non_null))
+    int_like = bool((non_null % 1 == 0).all())
+    return int_like and unique_ratio > 0.95
+
+
+def _detect_datetime_columns(df: pd.DataFrame) -> list[str]:
+    date_cols = df.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns.tolist()
+    object_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    for col in object_cols:
+        if col in date_cols:
+            continue
+        name = _norm(col)
+        if not any(h in name for h in DATE_HINTS):
+            continue
+        sample = df[col].dropna().head(20)
+        if sample.empty:
+            continue
+        parsed = pd.to_datetime(sample, errors="coerce")
+        if parsed.notna().mean() >= 0.7:
+            date_cols.append(col)
+    return date_cols
+
+
+def _score_metric_candidate(df: pd.DataFrame, col: str) -> float:
+    s = pd.to_numeric(df[col], errors="coerce").dropna()
+    if s.empty:
+        return -1e9
+    name = _norm(col)
+    score = 0.0
+    if any(h in name for h in METRIC_HINTS):
+        score += 8.0
+    if _is_probable_id(df[col], col):
+        score -= 12.0
+    unique_ratio = s.nunique(dropna=True) / max(1, len(s))
+    score += min(4.0, float(np.log1p(s.std(ddof=0) if len(s) > 1 else 0.0)))
+    score += 2.0 if unique_ratio < 0.9 else -2.0
+    score += 1.5 if (s >= 0).mean() > 0.9 else 0.0
+    score += 1.0 if s.quantile(0.99) > s.quantile(0.5) else 0.0
+    return score
+
+
+def _choose_primary_metric(df: pd.DataFrame) -> Optional[str]:
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    if not numeric_cols:
+        return None
+    ranked = sorted(
+        ((col, _score_metric_candidate(df, col)) for col in numeric_cols),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    return ranked[0][0] if ranked else None
+
+
+def _detect_dimensions(df: pd.DataFrame, metric_col: Optional[str], date_cols: list[str]) -> list[str]:
+    dims: list[str] = []
+    candidates = df.columns.tolist()
+    for col in candidates:
+        if col == metric_col or col in date_cols:
+            continue
+        s = df[col]
+        # object/category dimensions
+        if pd.api.types.is_object_dtype(s) or pd.api.types.is_categorical_dtype(s):
+            nunique = s.nunique(dropna=True)
+            if 2 <= nunique <= 100:
+                dims.append(col)
+                continue
+        # numeric low-cardinality dimensions (e.g., store_nbr)
+        if pd.api.types.is_numeric_dtype(s):
+            if _is_probable_id(s, col):
+                # Keep some ID-like dimensions if they are low-cardinality enough.
+                pass
+            nunique = s.nunique(dropna=True)
+            if 2 <= nunique <= 60:
+                dims.append(col)
+    return dims
+
+
+def _choose_trend_agg_mode(df: pd.DataFrame, metric_col: str, date_col: str) -> str:
+    """Choose trend aggregation mode.
+
+    - mean: preserves per-record scale when there are many rows per day and metric is bounded.
+    - sum: for additive metrics where totals are more meaningful.
+    """
+    name = _norm(metric_col)
+    s = pd.to_numeric(df[metric_col], errors="coerce").dropna()
+    if s.empty:
+        return "sum"
+    if any(tok in name for tok in ["rate", "ratio", "score", "avg", "average"]):
+        return "mean"
+    tmp = pd.DataFrame(
+        {
+            "_date": pd.to_datetime(df[date_col], errors="coerce"),
+            "_metric": pd.to_numeric(df[metric_col], errors="coerce"),
+        }
+    ).dropna()
+    if tmp.empty:
+        return "sum"
+    uniq_days = max(1, tmp["_date"].dt.date.nunique())
+    rows_per_day = len(tmp) / uniq_days
+    if rows_per_day > 1.5 and float(s.quantile(0.99)) <= 10_000:
+        return "mean"
+    return "sum"
+
+
+def _rank_dimension(
+    df: pd.DataFrame,
+    dim_col: str,
+    metric_col: str,
+    agg_mode: str,
+    n: int = 10,
+) -> list[dict[str, Any]]:
+    if dim_col not in df.columns or metric_col not in df.columns:
+        return []
+    tmp = pd.DataFrame(
+        {
+            "_dim": df[dim_col].astype(str),
+            "_metric": pd.to_numeric(df[metric_col], errors="coerce"),
+        }
+    ).dropna()
+    if tmp.empty:
+        return []
+    grouped = tmp.groupby("_dim", observed=True)["_metric"]
+    if agg_mode == "mean":
+        values = grouped.mean().sort_values(ascending=False).head(n)
+    else:
+        values = grouped.sum().sort_values(ascending=False).head(n)
+    total = float(values.sum()) or 1.0
+    rows = []
+    for name, val in values.items():
+        rows.append(
+            {
+                "name": str(name),
+                "value": round(float(val), 2),
+                "share_pct": round((float(val) / total) * 100, 2),
+            }
+        )
+    return rows
+
+
+def _build_time_trends(df: pd.DataFrame, date_col: str, metric_col: str, agg_mode: str) -> dict[str, Any]:
+    tmp = pd.DataFrame(
+        {
+            "_date": pd.to_datetime(df[date_col], errors="coerce"),
+            "_metric": pd.to_numeric(df[metric_col], errors="coerce"),
+        }
+    ).dropna()
+    if tmp.empty:
+        return {}
+    tmp = tmp.sort_values("_date")
+    g = tmp.groupby("_date")["_metric"]
+    daily = (g.mean() if agg_mode == "mean" else g.sum()).reset_index()
+
+    weekly_group = tmp.groupby(tmp["_date"].dt.to_period("W"))["_metric"]
+    monthly_group = tmp.groupby(tmp["_date"].dt.to_period("M"))["_metric"]
+    weekly = (weekly_group.mean() if agg_mode == "mean" else weekly_group.sum()).reset_index()
+    monthly = (monthly_group.mean() if agg_mode == "mean" else monthly_group.sum()).reset_index()
+
+    def _to_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+        f = frame.copy()
+        f.columns = ["period", "value"]
+        f["period"] = f["period"].astype(str)
+        f["value"] = f["value"].astype(float).round(2)
+        return f.to_dict(orient="records")
+
+    trend_direction = "flat"
+    if len(monthly) >= 3:
+        y = monthly.iloc[:, 1].astype(float).values
+        x = np.arange(len(y))
+        slope = float(np.polyfit(x, y, 1)[0])
+        baseline = float(np.mean(np.abs(y))) or 1.0
+        if slope > 0.01 * baseline:
+            trend_direction = "upward"
+        elif slope < -0.01 * baseline:
+            trend_direction = "downward"
+
+    return {
+        "daily": _to_records(daily),
+        "weekly": _to_records(weekly),
+        "monthly": _to_records(monthly),
+        "trend_direction": trend_direction,
+        "agg_mode": agg_mode,
+        "data_range_days": int((tmp["_date"].max() - tmp["_date"].min()).days),
+    }
+
+
+def _detect_anomalies(trends: dict[str, Any]) -> list[dict[str, Any]]:
+    monthly = trends.get("monthly", [])
+    if len(monthly) < 4:
+        return []
+    series = pd.Series([row.get("value", 0) for row in monthly], dtype="float64")
+    q1 = float(series.quantile(0.25))
+    q3 = float(series.quantile(0.75))
+    iqr = q3 - q1
+    if iqr == 0:
+        return []
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+    out: list[dict[str, Any]] = []
+    for row in monthly:
+        val = float(row.get("value", 0))
+        if val < lower or val > upper:
+            out.append(
+                {
+                    "period": str(row.get("period")),
+                    "value": round(val, 2),
+                    "type": "high" if val > upper else "low",
+                }
+            )
+    return out
 
 
 def _apply_time_window(
@@ -323,209 +271,216 @@ def _apply_time_window(
     date_col: str,
     reporting_months: int,
 ) -> tuple[pd.DataFrame, dict[str, Any], list[str]]:
-    """
-    Filters df to the most recent `reporting_months` of data.
-    Returns (filtered_df, reporting_window dict, guardrail_warnings list).
-    """
     warnings_out: list[str] = []
-
-    # Hard cap
     if reporting_months > MAX_MONTHS:
         warnings_out.append(
-            f"Requested window of {reporting_months} months exceeds the maximum of "
-            f"{MAX_MONTHS} months. Analysis capped at {MAX_MONTHS} months."
+            f"Requested window of {reporting_months} months exceeds the maximum of {MAX_MONTHS}. "
+            f"Analysis capped at {MAX_MONTHS} months."
         )
         reporting_months = MAX_MONTHS
 
     tmp = df.copy()
     tmp["_date"] = pd.to_datetime(tmp[date_col], errors="coerce")
     tmp = tmp.dropna(subset=["_date"])
+    if tmp.empty:
+        return df, {}, warnings_out
 
-    rows_before = len(tmp)
-    data_min    = tmp["_date"].min()
-    data_max    = tmp["_date"].max()
+    data_min = tmp["_date"].min()
+    data_max = tmp["_date"].max()
     data_months = (data_max.year - data_min.year) * 12 + (data_max.month - data_min.month)
-
-    # Lower bound check
     if data_months < MIN_MONTHS:
         warnings_out.append(
-            f"Dataset only contains ~{data_months} month(s) of data "
-            f"({data_min.strftime('%b %Y')} – {data_max.strftime('%b %Y')}). "
-            f"At least {MIN_MONTHS} months is recommended for reliable trend analysis."
+            f"Dataset has about {data_months} month(s) of history. "
+            f"At least {MIN_MONTHS} months is recommended for stable trend analysis."
         )
 
-    # Trend reliability warning scaled to window
-    if reporting_months < 6:
-        warnings_out.append(
-            f"Trend direction may be unreliable — requested window is only "
-            f"{reporting_months} months. At least 6 months is recommended."
-        )
-    elif reporting_months < 12:
-        warnings_out.append(
-            f"Trend direction is based on {reporting_months} months of data. "
-            f"Results may improve with a full 12 months of history."
-        )
-
-    # Filter to window
     cutoff = data_max - pd.DateOffset(months=reporting_months)
     filtered = tmp[tmp["_date"] > cutoff].drop(columns=["_date"])
-    rows_after = len(filtered)
-
-    logger.info(
-        "Time window filter: %d months, cutoff=%s, rows %d → %d",
-        reporting_months, cutoff.strftime("%Y-%m-%d"), rows_before, rows_after,
-    )
-
-    if rows_after == 0:
+    if filtered.empty:
         warnings_out.append(
-            f"No data found within the last {reporting_months} months "
-            f"(cutoff: {cutoff.strftime('%b %d, %Y')}). Full dataset used instead."
+            f"No rows found within the last {reporting_months} months; full dataset was used."
         )
-        filtered = df  # fall back to full dataset
+        filtered = df
 
-    window = {
+    reporting_window = {
         "requested_months": reporting_months,
-        "cutoff_date":      cutoff.strftime("%b %d, %Y"),
-        "actual_from":      filtered.pipe(
-            lambda d: pd.to_datetime(d[date_col], errors="coerce").min()
-        ).strftime("%b %d, %Y") if rows_after > 0 else data_min.strftime("%b %d, %Y"),
-        "actual_to":        data_max.strftime("%b %d, %Y"),
-        "rows_before_filter": rows_before,
-        "rows_after_filter":  rows_after if rows_after > 0 else rows_before,
-        "data_total_months":  data_months,
+        "cutoff_date": cutoff.strftime("%b %d, %Y"),
+        "actual_to": data_max.strftime("%b %d, %Y"),
+        "rows_after_filter": int(len(filtered)),
     }
+    return filtered, reporting_window, warnings_out
 
-    return filtered, window, warnings_out
-
-
-# ── Confidence / uncertainty guardrails ───────────────────────────────────────
-
-def _confidence_guardrails(
-    df: pd.DataFrame,
-    cols: dict,
-    kpis: dict,
-    top5_regions: list[dict],
-) -> list[str]:
-    """
-    Checks for weak or incomplete inputs and returns plain-English warning strings.
-    """
-    warnings_out: list[str] = []
-    sales_col = cols.get("sales_col")
-
-    # No sales column
-    if not sales_col:
-        warnings_out.append(
-            "Total sales could not be calculated — no revenue or sales column detected."
-        )
-
-    # No date column
-    if not cols.get("date_col"):
-        warnings_out.append(
-            "Time trends and period-over-period growth could not be calculated "
-            "— no date column detected."
-        )
-
-    # Growth unavailable
-    if cols.get("date_col") and kpis.get("growth_over_previous_period") is None:
-        warnings_out.append(
-            "Period-over-period growth could not be calculated "
-            "— insufficient date range in the selected window."
-        )
-
-    # High null rate on sales column
-    if sales_col and sales_col in df.columns:
-        null_pct = df[sales_col].isna().mean() * 100
-        if null_pct > 20:
-            warnings_out.append(
-                f"{null_pct:.1f}% of sales values are null — "
-                f"totals may be understated."
-            )
-
-    # Units sold estimated from row count (no qty col)
-    if not cols.get("qty_col"):
-        warnings_out.append(
-            "Units sold is estimated from row count — no quantity column detected."
-        )
-
-    # Regional totals reconciliation
-    if top5_regions and sales_col:
-        total_sales = kpis.get("total_sales") or 0
-        region_sum  = sum(r["sales"] for r in top5_regions)
-        if total_sales > 0 and region_sum > total_sales * 1.05:
-            warnings_out.append(
-                f"Regional totals ({region_sum:,.2f}) do not reconcile with overall "
-                f"revenue ({total_sales:,.2f}) — possible overlap or misdetected grouping column."
-            )
-
-    return warnings_out
-
-
-# ── Public entry point ────────────────────────────────────────────────────────
 
 def run_analytics(
     dataset_name: str,
     df: pd.DataFrame,
-    reporting_months: int = 0,  # ignored — always uses full dataset
+    reporting_months: int = 0,
 ) -> dict[str, Any]:
-    """
-    Runs the full rules-based analytics pipeline on a single DataFrame.
-
-    Returns a structured `findings` dict ready for chart_generator and llm_writer.
-    No I/O — pure computation.
-    """
     logger.info("Analytics engine starting: %s (%d rows, %d cols)", dataset_name, len(df), len(df.columns))
 
-    guardrail_warnings: list[str] = []
-    reporting_window:   dict      = {}
-
-    cols = _detect_columns(df)
-
-    # No time-window truncation — always analyse the full dataset
-    if not cols["date_col"]:
-        guardrail_warnings.append(
-            "Time trends and period-over-period growth could not be calculated — no date column detected."
-        )
-
-    # ── Core analytics ────────────────────────────────────────────────────────
-    kpis      = _compute_kpis(df, cols)
-    trends    = _time_trends(df, cols)
-    anomalies = _detect_anomalies(df, cols)
-
-    kpis["trend_summary"] = _trend_summary(kpis, trends, anomalies)
-
-    top5_products  = _top_n(df, cols["product_col"],  cols["sales_col"], n=5)
-    top10_products = _top_n(df, cols["product_col"],  cols["sales_col"], n=10)
-    top5_regions   = _top_n(df, cols["region_col"],   cols["sales_col"], n=5)
-    cat_contrib    = _category_contribution(df, cols)
-
-    # ── Confidence guardrails ─────────────────────────────────────────────────
-    guardrail_warnings.extend(
-        _confidence_guardrails(df, cols, kpis, top5_regions)
-    )
-
     findings: dict[str, Any] = {
-        "dataset_name":          dataset_name,
-        "row_count":             int(len(df)),
-        "detected_columns":      cols,
-        "reporting_window":      reporting_window,
-        "guardrail_warnings":    guardrail_warnings,
-        "kpis":                  kpis,
-        "top_5_products":        top5_products,
-        "top_10_products":       top10_products,
-        "top_5_regions":         top5_regions,
-        "category_contribution": cat_contrib,
-        "best_worst_period":     _best_worst_period(df, cols),
-        "time_trends":           trends,
-        "pareto":                _pareto_analysis(df, cols),
-        "anomalies":             anomalies,
-        "seasonality_hint":      _seasonality_hint(trends),
-        "reporting_period": (
-            f"{pd.to_datetime(df[cols['date_col']], errors='coerce').dropna().min().strftime('%b %d, %Y')} – "
-            f"{pd.to_datetime(df[cols['date_col']], errors='coerce').dropna().max().strftime('%b %d, %Y')}"
-        ) if cols.get("date_col") and cols["date_col"] in df.columns else "All available data",
+        "dataset_name": dataset_name,
+        "row_count": int(len(df)),
+        "detected_columns": {},
+        "reporting_window": {},
+        "guardrail_warnings": [],
+        "kpis": {},
+        "kpi_cards": [],
+        "time_trends": {},
+        "anomalies": [],
+        "top_rankings": [],
+        "best_worst_period": {},
+        "reporting_period": "All available data",
+        "metric": {},
     }
 
-    if guardrail_warnings:
-        logger.warning("Guardrail warnings for %s: %s", dataset_name, guardrail_warnings)
+    if df.empty:
+        findings["guardrail_warnings"].append("Dataset is empty; report contains only fallback summaries.")
+        return findings
+
+    date_cols = _detect_datetime_columns(df)
+    metric_col = _choose_primary_metric(df)
+
+    if not metric_col:
+        findings["guardrail_warnings"].append(
+            "No usable numeric metric column was detected. Charts and KPI values are limited."
+        )
+        return findings
+
+    metric_label = _norm(metric_col).replace("_", " ").title()
+    dims = _detect_dimensions(df, metric_col, date_cols)
+    date_col = date_cols[0] if date_cols else None
+
+    findings["detected_columns"] = {
+        "metric_col": metric_col,
+        "date_col": date_col,
+        "dimension_cols": dims,
+    }
+
+    working_df = df
+    if reporting_months and reporting_months > 0 and date_col:
+        working_df, window, warns = _apply_time_window(df, date_col, reporting_months)
+        findings["reporting_window"] = window
+        findings["guardrail_warnings"].extend(warns)
+
+    metric_series = pd.to_numeric(working_df[metric_col], errors="coerce").dropna()
+    if metric_series.empty:
+        findings["guardrail_warnings"].append(
+            f"Metric column '{metric_col}' has no numeric values after cleaning."
+        )
+        return findings
+
+    agg_mode = _choose_trend_agg_mode(working_df, metric_col, date_col) if date_col else "sum"
+    metric_total = float(metric_series.sum())
+    metric_avg = float(metric_series.mean())
+    metric_median = float(metric_series.median())
+
+    kpis = {
+        "total_sales": round(metric_total, 2),  # backward compatibility with existing consumers
+        "average_order_value": round(metric_avg, 2),
+        "total_orders": int(len(working_df)),
+        "units_sold": int(len(working_df)),
+        "growth_over_previous_period": None,
+        "trend_summary": "",
+        "metric_total": round(metric_total, 2),
+        "metric_average": round(metric_avg, 2),
+        "metric_median": round(metric_median, 2),
+        "metric_column": metric_col,
+        "metric_label": metric_label,
+    }
+
+    trends = _build_time_trends(working_df, date_col, metric_col, agg_mode) if date_col else {}
+    anomalies = _detect_anomalies(trends)
+
+    monthly = trends.get("monthly", [])
+    if len(monthly) >= 2:
+        first_val = float(monthly[0]["value"])
+        last_val = float(monthly[-1]["value"])
+        if abs(first_val) > 1e-9:
+            kpis["growth_over_previous_period"] = round(((last_val - first_val) / abs(first_val)) * 100, 2)
+
+    trend_dir = trends.get("trend_direction", "flat")
+    kpis["trend_summary"] = f"{metric_label} trend is {trend_dir}."
+
+    rankings: list[dict[str, Any]] = []
+    for dim in dims[:3]:
+        items = _rank_dimension(working_df, dim, metric_col, agg_mode, n=10)
+        if items:
+            rankings.append(
+                {
+                    "dimension": dim,
+                    "label": _norm(dim).replace("_", " ").title(),
+                    "metric_label": metric_label,
+                    "items": items,
+                }
+            )
+
+    best_worst = {}
+    if monthly:
+        sorted_monthly = sorted(monthly, key=lambda x: float(x["value"]))
+        best_worst = {
+            "best_period": {
+                "period": str(sorted_monthly[-1]["period"]),
+                "value": round(float(sorted_monthly[-1]["value"]), 2),
+            },
+            "worst_period": {
+                "period": str(sorted_monthly[0]["period"]),
+                "value": round(float(sorted_monthly[0]["value"]), 2),
+            },
+        }
+
+    if agg_mode == "mean":
+        kpi_cards = [
+            {"label": f"Average {metric_label}", "value": metric_avg, "subtitle": "Per record"},
+            {"label": f"Median {metric_label}", "value": metric_median, "subtitle": "Central tendency"},
+            {"label": "Records", "value": int(len(working_df)), "subtitle": "Rows analyzed"},
+            {"label": "Distinct Columns", "value": int(len(working_df.columns)), "subtitle": "Dataset width"},
+            {"label": "Period Growth", "value": kpis["growth_over_previous_period"], "subtitle": "First vs last period"},
+        ]
+    else:
+        kpi_cards = [
+            {"label": f"Total {metric_label}", "value": metric_total, "subtitle": "Across reporting period"},
+            {"label": f"Average {metric_label}", "value": metric_avg, "subtitle": "Per record"},
+            {"label": "Records", "value": int(len(working_df)), "subtitle": "Rows analyzed"},
+            {"label": "Distinct Columns", "value": int(len(working_df.columns)), "subtitle": "Dataset width"},
+            {"label": "Period Growth", "value": kpis["growth_over_previous_period"], "subtitle": "First vs last period"},
+        ]
+
+    if date_col:
+        date_vals = pd.to_datetime(working_df[date_col], errors="coerce").dropna()
+        if not date_vals.empty:
+            findings["reporting_period"] = (
+                f"{date_vals.min().strftime('%b %d, %Y')} - {date_vals.max().strftime('%b %d, %Y')}"
+            )
+
+    findings.update(
+        {
+            "row_count": int(len(working_df)),
+            "kpis": kpis,
+            "kpi_cards": kpi_cards,
+            "time_trends": trends,
+            "anomalies": anomalies,
+            "top_rankings": rankings,
+            "best_worst_period": best_worst,
+            "metric": {
+                "column": metric_col,
+                "label": metric_label,
+                "trend_agg_mode": agg_mode,
+            },
+            # Backward-compatible keys expected by older report templates/readers
+            "top_5_products": rankings[0]["items"][:5] if rankings else [],
+            "top_10_products": rankings[0]["items"][:10] if rankings else [],
+            "top_5_regions": rankings[1]["items"][:5] if len(rankings) > 1 else [],
+            "category_contribution": rankings[2]["items"][:20] if len(rankings) > 2 else [],
+            "pareto": {},
+            "seasonality_hint": None,
+        }
+    )
+
+    if not date_col:
+        findings["guardrail_warnings"].append(
+            "No date column detected; time-trend and growth analyses are limited."
+        )
+
     logger.info("Analytics engine complete: %s", dataset_name)
     return findings

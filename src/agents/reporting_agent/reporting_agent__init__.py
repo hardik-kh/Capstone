@@ -1,3 +1,3 @@
-from agents.reporting_agent.reporting_agent import run_reporting
+from src.agents.reporting_agent.reporting_agent import run_reporting
 
 __all__ = ["run_reporting"]

@@ -19,14 +19,14 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from core.config import (
+from src.core.config import (
     AZURE_OPENAI_API_KEY,
     AZURE_OPENAI_API_VERSION,
     AZURE_OPENAI_DEPLOYMENT_NAME,
     AZURE_OPENAI_ENDPOINT,
     DATA_DIR,
 )
-from core.logger import get_logger
+from src.core.logger import get_logger
 
 logger = get_logger("EDAAgent")
 

@@ -4,8 +4,8 @@ import os
 import pandas as pd
 from fastapi import UploadFile
 
-from core.config import SUPPORTED_EXTENSIONS
-from core.exceptions import UnsupportedFormatError
+from src.core.config import SUPPORTED_EXTENSIONS
+from src.core.exceptions import UnsupportedFormatError
 
 
 def validate_file(file: UploadFile) -> str:

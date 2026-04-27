@@ -13,6 +13,7 @@ httpx==0.28.1
 idna==3.11
 numpy==2.4.2
 ollama==0.6.1
+openpyxl==3.1.5
 pandas==3.0.1
 polars==1.38.1
 polars-runtime-32==1.38.1
@@ -31,3 +32,4 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3
 uvicorn==0.41.0
+xlrd==2.0.1

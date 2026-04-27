@@ -8,13 +8,19 @@
 from __future__ import annotations
 
 import base64
+import html
 import os
 from datetime import datetime
 from typing import Any
 
-from core.logger import get_logger
+from src.core.logger import get_logger
 
 logger = get_logger("ReportComposer")
+
+
+def _esc(value: Any) -> str:
+    """Escapes user/model-provided content for safe HTML rendering."""
+    return html.escape("" if value is None else str(value), quote=True)
 
 
 # ── Base64 image helper ───────────────────────────────────────────────────────
@@ -36,7 +42,7 @@ def _guardrail_warnings_html(warnings: list[str]) -> str:
     items = "".join(
         f'<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;">'
         f'<span style="flex-shrink:0;color:#D97706;">⚠</span>'
-        f'<span>{w}</span></div>'
+        f'<span>{_esc(w)}</span></div>'
         for w in warnings
     )
     return (
@@ -303,29 +309,29 @@ _HTML_TEMPLATE = """\
   <div class="section-label">Key Performance Indicators</div>
   <div class="kpi-grid">
     <div class="kpi-card">
-      <div class="kpi-label">Total Sales</div>
-      <div class="kpi-value">{kpi_total_sales}</div>
-      <div class="kpi-sub">Reporting period</div>
+      <div class="kpi-label">{kpi_1_label}</div>
+      <div class="kpi-value">{kpi_1_value}</div>
+      <div class="kpi-sub">{kpi_1_sub}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Total Orders</div>
-      <div class="kpi-value">{kpi_total_orders}</div>
-      <div class="kpi-sub">Unique transactions</div>
+      <div class="kpi-label">{kpi_2_label}</div>
+      <div class="kpi-value">{kpi_2_value}</div>
+      <div class="kpi-sub">{kpi_2_sub}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Units Sold</div>
-      <div class="kpi-value">{kpi_units_sold}</div>
-      <div class="kpi-sub">Total quantity</div>
+      <div class="kpi-label">{kpi_3_label}</div>
+      <div class="kpi-value">{kpi_3_value}</div>
+      <div class="kpi-sub">{kpi_3_sub}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Avg. Order Value</div>
-      <div class="kpi-value">{kpi_aov}</div>
-      <div class="kpi-sub">Per transaction</div>
+      <div class="kpi-label">{kpi_4_label}</div>
+      <div class="kpi-value">{kpi_4_value}</div>
+      <div class="kpi-sub">{kpi_4_sub}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Period Growth</div>
-      <div class="kpi-value" style="font-size:14pt">{kpi_growth}</div>
-      <div class="kpi-sub">vs prior period</div>
+      <div class="kpi-label">{kpi_5_label}</div>
+      <div class="kpi-value" style="font-size:14pt">{kpi_5_value}</div>
+      <div class="kpi-sub">{kpi_5_sub}</div>
     </div>
   </div>
 
@@ -383,16 +389,36 @@ def _chart_html(chart: dict, width: str = "100%") -> str:
     b64 = _img_to_b64(chart["path"])
     if not b64:
         return ""
-    caption = chart.get("caption", "")
+    caption = _esc(chart.get("caption", ""))
+    chart_type = _esc(chart.get("type", "chart"))
     return (
         f'<div class="chart-block">'
-        f'<img src="{b64}" style="width:{width}" alt="{chart["type"]}" />'
+        f'<img src="{b64}" style="width:{width}" alt="{chart_type}" />'
         f'<div class="chart-caption">{caption}</div>'
         f"</div>"
     )
 
 
 def _rankings_html(findings: dict) -> str:
+    top_rankings = findings.get("top_rankings") or []
+    if top_rankings:
+        sections = top_rankings[:2]
+        html = '<div style="display:flex;gap:16px;margin-bottom:4px;">'
+        for sec in sections:
+            title = _esc(sec.get("label", "Top Breakdown"))
+            items = sec.get("items", [])[:5]
+            html += f'<div style="flex:1"><div class="section-label" style="margin-top:8px">Top 5 {title}</div>'
+            html += "<table><tr><th>#</th><th>Name</th><th>Value</th><th>Share</th></tr>"
+            for i, row in enumerate(items, 1):
+                val = row.get("sales", row.get("value", 0))
+                html += (
+                    f"<tr><td>{i}</td><td>{_esc(row.get('name', 'N/A'))}</td>"
+                    f"<td>{_fmt_val(val)}</td><td>{float(row.get('share_pct', 0)):.1f}%</td></tr>"
+                )
+            html += "</table></div>"
+        html += "</div>"
+        return html
+
     products = findings.get("top_5_products", [])
     regions  = findings.get("top_5_regions", [])
     if not products and not regions:
@@ -404,14 +430,22 @@ def _rankings_html(findings: dict) -> str:
         html += '<div style="flex:1"><div class="section-label" style="margin-top:8px">Top 5 Products</div>'
         html += "<table><tr><th>#</th><th>Product</th><th>Sales</th><th>Share</th></tr>"
         for i, p in enumerate(products, 1):
-            html += f"<tr><td>{i}</td><td>{p['name']}</td><td>{_fmt_val(p['sales'])}</td><td>{p['share_pct']:.1f}%</td></tr>"
+            val = p.get("sales", p.get("value", 0))
+            html += (
+                f"<tr><td>{i}</td><td>{_esc(p['name'])}</td>"
+                f"<td>{_fmt_val(val)}</td><td>{p['share_pct']:.1f}%</td></tr>"
+            )
         html += "</table></div>"
 
     if regions:
         html += '<div style="flex:1"><div class="section-label" style="margin-top:8px">Top 5 Regions</div>'
         html += "<table><tr><th>#</th><th>Region</th><th>Sales</th><th>Share</th></tr>"
         for i, r in enumerate(regions, 1):
-            html += f"<tr><td>{i}</td><td>{r['name']}</td><td>{_fmt_val(r['sales'])}</td><td>{r['share_pct']:.1f}%</td></tr>"
+            val = r.get("sales", r.get("value", 0))
+            html += (
+                f"<tr><td>{i}</td><td>{_esc(r['name'])}</td>"
+                f"<td>{_fmt_val(val)}</td><td>{r['share_pct']:.1f}%</td></tr>"
+            )
         html += "</table></div>"
 
     html += "</div>"
@@ -419,26 +453,22 @@ def _rankings_html(findings: dict) -> str:
 
 
 def _supporting_charts_html(charts: list[dict]) -> str:
-    # Show charts 2 and 3 (region + category) side by side, then chart 4 full-width
-    if len(charts) < 2:
-        return "".join(_chart_html(c) for c in charts[1:])
-
+    # Generic layout: first two side-by-side, then up to two more full-width.
+    others = charts[1:] if len(charts) > 1 else []
+    if not others:
+        return ""
     html = ""
-    side_charts = [c for c in charts[1:] if c["type"] in ("sales_by_region", "sales_by_category")]
-    remaining   = [c for c in charts[1:] if c["type"] not in ("sales_by_region", "sales_by_category")]
-
-    if len(side_charts) >= 2:
+    if len(others) >= 2:
         html += '<div class="chart-row">'
-        html += _chart_html(side_charts[0], "100%")
-        html += _chart_html(side_charts[1], "100%")
+        html += _chart_html(others[0], "100%")
+        html += _chart_html(others[1], "100%")
         html += "</div>"
-        remaining = side_charts[2:] + remaining
-    elif side_charts:
-        html += _chart_html(side_charts[0])
-
-    for c in remaining[:2]:   # at most 2 more
+        others = others[2:]
+    elif others:
+        html += _chart_html(others[0])
+        others = others[1:]
+    for c in others[:2]:
         html += _chart_html(c)
-
     return html
 
 
@@ -449,7 +479,8 @@ def _anomaly_badges_html(anomalies: list[dict]) -> str:
     for a in anomalies:
         cls = "badge-high" if a["type"] == "high" else "badge-low"
         label = "HIGH" if a["type"] == "high" else "LOW"
-        badges += f'<span class="badge {cls}">{label}: {a["period"]} (${a["sales"]:,.0f})</span>'
+        val = a.get("sales", a.get("value", 0))
+        badges += f'<span class="badge {cls}">{label}: {_esc(a["period"])} ({_fmt_val(val)})</span>'
     return f"<div style='margin:6px 0 10px 0'>{badges}</div>"
 
 
@@ -461,22 +492,24 @@ def _best_worst_html(findings: dict) -> str:
         return ""
     html = '<div style="display:flex;gap:16px;margin-top:10px">'
     if best:
+        best_val = best.get("sales", best.get("value"))
         html += (
             f'<div style="flex:1;background:#F0FDF4;border:1px solid #BBF7D0;'
             f'border-radius:6px;padding:10px 14px">'
             f'<div style="font-size:8pt;font-weight:600;color:#15803D;text-transform:uppercase;'
             f'letter-spacing:0.8px">Best Period</div>'
-            f'<div style="font-size:15pt;font-weight:700;color:#14532D">{best["period"]}</div>'
-            f'<div style="font-size:9pt;color:#166534">{_fmt_val(best["sales"])}</div></div>'
+            f'<div style="font-size:15pt;font-weight:700;color:#14532D">{_esc(best["period"])}</div>'
+            f'<div style="font-size:9pt;color:#166534">{_fmt_val(best_val)}</div></div>'
         )
     if worst:
+        worst_val = worst.get("sales", worst.get("value"))
         html += (
             f'<div style="flex:1;background:#FFF7ED;border:1px solid #FED7AA;'
             f'border-radius:6px;padding:10px 14px">'
             f'<div style="font-size:8pt;font-weight:600;color:#C2410C;text-transform:uppercase;'
             f'letter-spacing:0.8px">Worst Period</div>'
-            f'<div style="font-size:15pt;font-weight:700;color:#7C2D12">{worst["period"]}</div>'
-            f'<div style="font-size:9pt;color:#9A3412">{_fmt_val(worst["sales"])}</div></div>'
+            f'<div style="font-size:15pt;font-weight:700;color:#7C2D12">{_esc(worst["period"])}</div>'
+            f'<div style="font-size:9pt;color:#9A3412">{_fmt_val(worst_val)}</div></div>'
         )
     html += "</div>"
     return html
@@ -502,9 +535,28 @@ def compose_report(
                         for c in findings.get("dataset_name", "report")).strip("_") or "report"
 
     kpis = findings.get("kpis", {})
+    kpi_cards = findings.get("kpi_cards") or []
+
+    def _card(idx: int, default_label: str, default_value: Any, default_sub: str) -> dict[str, Any]:
+        if idx < len(kpi_cards):
+            card = kpi_cards[idx] or {}
+            return {
+                "label": _esc(card.get("label", default_label)),
+                "value": card.get("value", default_value),
+                "sub": _esc(card.get("subtitle", default_sub)),
+            }
+        return {"label": _esc(default_label), "value": default_value, "sub": _esc(default_sub)}
+
+    c1 = _card(0, "Total", kpis.get("total_sales"), "Across reporting period")
+    c2 = _card(1, "Average", kpis.get("average_order_value"), "Per record")
+    c3 = _card(2, "Records", kpis.get("total_orders"), "Rows analyzed")
+    c4 = _card(3, "Columns", None, "Dataset width")
+    c5 = _card(4, "Period Growth", kpis.get("growth_over_previous_period"), "First vs last period")
 
     # Build the main chart (sales trend) for page 1
-    main_chart = next((c for c in charts if c["type"] == "sales_trend"), None)
+    main_chart = next((c for c in charts if c.get("type") in {"metric_trend", "sales_trend"}), None)
+    if not main_chart and charts:
+        main_chart = charts[0]
     main_chart_html = _chart_html(main_chart) if main_chart else ""
 
     # Count pages dynamically from the template so "X of Y" is always correct
@@ -512,24 +564,34 @@ def compose_report(
 
     html = _HTML_TEMPLATE.format(
         total_pages         = total_pages,
-        report_title        = f"Sales Performance Report — {findings.get('dataset_name', '')}",
-        dataset_name        = findings.get("dataset_name", ""),
-        reporting_period    = findings.get("reporting_period", "All available data"),
+        report_title        = _esc(f"Sales Performance Report — {findings.get('dataset_name', '')}"),
+        dataset_name        = _esc(findings.get("dataset_name", "")),
+        reporting_period    = _esc(findings.get("reporting_period", "All available data")),
         generated_at        = datetime.now().strftime("%B %d, %Y %H:%M"),
-        executive_summary   = sections.get("executive_summary", ""),
+        executive_summary   = _esc(sections.get("executive_summary", "")),
         guardrail_warnings_html = _guardrail_warnings_html(findings.get("guardrail_warnings", [])),
-        kpi_total_sales     = _fmt_val(kpis.get("total_sales")),
-        kpi_total_orders    = _fmt_val(kpis.get("total_orders")),
-        kpi_units_sold      = _fmt_val(kpis.get("units_sold")),
-        kpi_aov             = _fmt_val(kpis.get("average_order_value")),
-        kpi_growth          = _fmt_growth(kpis.get("growth_over_previous_period")),
+        kpi_1_label         = c1["label"],
+        kpi_1_value         = _fmt_val(c1["value"]),
+        kpi_1_sub           = c1["sub"],
+        kpi_2_label         = c2["label"],
+        kpi_2_value         = _fmt_val(c2["value"]),
+        kpi_2_sub           = c2["sub"],
+        kpi_3_label         = c3["label"],
+        kpi_3_value         = _fmt_val(c3["value"]),
+        kpi_3_sub           = c3["sub"],
+        kpi_4_label         = c4["label"],
+        kpi_4_value         = _fmt_val(c4["value"]),
+        kpi_4_sub           = c4["sub"],
+        kpi_5_label         = c5["label"],
+        kpi_5_value         = _fmt_growth(c5["value"]),
+        kpi_5_sub           = c5["sub"],
         main_chart_html     = main_chart_html,
-        key_findings        = sections.get("key_findings", ""),
+        key_findings        = _esc(sections.get("key_findings", "")),
         rankings_html       = _rankings_html(findings),
         supporting_charts_html = _supporting_charts_html(charts),
-        risks_and_anomalies = sections.get("risks_and_anomalies", ""),
+        risks_and_anomalies = _esc(sections.get("risks_and_anomalies", "")),
         anomaly_badges_html = _anomaly_badges_html(findings.get("anomalies", [])),
-        recommended_actions = sections.get("recommended_actions", ""),
+        recommended_actions = _esc(sections.get("recommended_actions", "")),
         best_worst_html     = _best_worst_html(findings),
     )
 

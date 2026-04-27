@@ -6,13 +6,13 @@ import shutil
 from datetime import datetime
 import pandas as pd
 
-from core.config import (
+from src.core.config import (
     BRONZE_OUTPUT_DIR,
     CSV_DELIMITERS,
     ENCODING_FALLBACKS,
     LARGE_CSV_SAMPLE_ROWS,
 )
-from core.exceptions import FileReadError
+from src.core.exceptions import FileReadError
 
 
 def detect_encoding(file_path: str) -> str:
