@@ -10,7 +10,7 @@ A multi-agent analytics system that ingests CSV/Excel files and produces:
 
 ## Architecture
 
-The backend is a FastAPI service with specialized agents under `src/agents/`:
+The backend is built using FastAPI and follows a modular multi-agent architecture under 'src/agents/':
 - `ingestion_agent`: upload handling, profiling, merge orchestration
 - `statistical_agent`: hypothesis/statistical tests
 - `eda_agent`: automatic exploratory plots + insights
